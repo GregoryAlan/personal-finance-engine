@@ -1,0 +1,6 @@
+node_modules/
+build/
+data/finance.db
+data/finance.db-wal
+data/finance.db-shm
+data/imports/*.csv
