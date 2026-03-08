@@ -14,13 +14,17 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
       min_amount: z.number().optional().describe("Minimum amount (use negative for expenses)"),
       max_amount: z.number().optional().describe("Maximum amount"),
       description: z.string().optional().describe("Search description (partial match)"),
+      merchant: z.string().optional().describe("Search by normalized merchant name (partial match)"),
       uncategorized: z.boolean().optional().describe("Only show uncategorized transactions"),
       group_by: z
-        .enum(["category", "month", "account", "description"])
+        .enum(["category", "month", "account", "description", "merchant"])
         .optional()
         .describe("Group results and return aggregates instead of individual transactions"),
       limit: z.number().optional().describe("Max results (default 100)"),
       offset: z.number().optional().describe("Skip N results for pagination"),
+      tags: z.string().optional().describe("Filter by tag (partial match)"),
+      include_excluded: z.boolean().optional().describe("Include excluded/split-parent transactions"),
+      exclude_transfers: z.boolean().optional().describe("Exclude transfer transactions from results"),
     },
     async (filters) => {
       const result = db.queryTransactions({
@@ -31,10 +35,14 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
         min_amount: filters.min_amount,
         max_amount: filters.max_amount,
         description: filters.description,
+        merchant: filters.merchant,
         uncategorized: filters.uncategorized,
         group_by: filters.group_by,
         limit: filters.limit,
         offset: filters.offset,
+        tags: filters.tags,
+        include_excluded: filters.include_excluded,
+        exclude_transfers: filters.exclude_transfers,
       });
 
       return {

@@ -9,6 +9,7 @@ import { registerImportTools } from "./tools/import.js";
 import { registerQueryTools } from "./tools/query.js";
 import { registerAnalyzeTools } from "./tools/analyze.js";
 import { registerProjectTools } from "./tools/project.js";
+import { registerEditTools } from "./tools/edit.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = join(__dirname, "..", "data", "finance.db");
@@ -24,6 +25,7 @@ registerImportTools(server, db);
 registerQueryTools(server, db);
 registerAnalyzeTools(server, db);
 registerProjectTools(server, db);
+registerEditTools(server, db);
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();

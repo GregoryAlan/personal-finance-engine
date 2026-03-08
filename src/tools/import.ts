@@ -8,6 +8,9 @@ import { parseCSV } from "../import/parser.js";
 import { detectInstitution, INSTITUTION_MAPPINGS } from "../import/mappings.js";
 import { normalizeTransaction, generateFingerprint } from "../import/normalizer.js";
 import type { ImportConfig } from "../import/types.js";
+import { importAggregatorCSV } from "../import/aggregator.js";
+import { classifyAsset } from "../import/asset-classes.js";
+import { importHoldingsCSV } from "../import/holdings-csv.js";
 
 export function registerImportTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -130,6 +133,7 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           institution_category: normalized.category,
           check_number: normalized.check_number,
           batch_id: batchId,
+          merchant: normalized.merchant,
         });
 
         if (result.action === "inserted") {
@@ -379,8 +383,35 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         };
       }
 
+      // Auto-classify asset classes
+      const unclassified: string[] = [];
+      for (const h of holdingsToImport) {
+        if (!h.asset_class) {
+          const detected = classifyAsset(h.symbol, h.name);
+          if (detected) {
+            h.asset_class = detected;
+          } else {
+            unclassified.push(h.symbol);
+          }
+        }
+      }
+
       const count = db.upsertHoldings(account_id, as_of, holdingsToImport);
       const totalValue = holdingsToImport.reduce((sum, h) => sum + (h.current_value ?? 0), 0);
+
+      // Build allocation summary
+      const allocationMap: Record<string, number> = {};
+      for (const h of holdingsToImport) {
+        const cls = h.asset_class ?? "other";
+        allocationMap[cls] = (allocationMap[cls] ?? 0) + (h.current_value ?? 0);
+      }
+      const allocation_summary = Object.entries(allocationMap)
+        .map(([asset_class, value]) => ({
+          asset_class,
+          value: Math.round(value * 100) / 100,
+          pct: totalValue > 0 ? Math.round((value / totalValue) * 10000) / 100 : 0,
+        }))
+        .sort((a, b) => b.value - a.value);
 
       return {
         content: [
@@ -396,7 +427,10 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
                   symbol: h.symbol,
                   shares: h.shares,
                   value: h.current_value,
+                  asset_class: h.asset_class ?? "other",
                 })),
+                allocation_summary,
+                unclassified: unclassified.length > 0 ? unclassified : undefined,
               },
               null,
               2
@@ -404,6 +438,208 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           },
         ],
       };
+    }
+  );
+
+  server.tool(
+    "record_balances",
+    "Record current balances for multiple accounts at once. Creates balance snapshots used by net_worth_history, get_balances, and balance_sheet.",
+    {
+      balances: z
+        .array(
+          z.object({
+            account_id: z.number().optional().describe("Account ID"),
+            account_name: z.string().optional().describe("Account name (alternative to account_id)"),
+            balance: z.number().describe("Current balance (positive for assets, negative for liabilities)"),
+            date: z.string().optional().describe("Snapshot date (defaults to today)"),
+          })
+        )
+        .describe("Array of account balances to record"),
+    },
+    async ({ balances }) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const results: { account: string; balance: number; date: string }[] = [];
+      const notFound: string[] = [];
+
+      for (const entry of balances) {
+        let account: Record<string, unknown> | undefined;
+        if (entry.account_id) {
+          account = db.getAccount(entry.account_id);
+        } else if (entry.account_name) {
+          account = db.getAccountByName(entry.account_name);
+        }
+
+        if (!account) {
+          notFound.push(entry.account_name ?? `id:${entry.account_id}`);
+          continue;
+        }
+
+        const date = entry.date ?? today;
+        db.recordBalance(account.id as number, entry.balance, date, "manual");
+        results.push({
+          account: account.name as string,
+          balance: entry.balance,
+          date,
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                recorded: results.length,
+                snapshots: results,
+                not_found: notFound.length > 0 ? notFound : undefined,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "compute_balances",
+    "Given a known current balance and transaction history, reconstruct monthly balance snapshots going backward (and forward). Refuses investment accounts — their balances depend on market prices, not transaction math.",
+    {
+      account_id: z.number().describe("Account ID"),
+      anchor_balance: z.number().describe("Known balance at anchor_date"),
+      anchor_date: z.string().describe("Date of the known balance (YYYY-MM-DD)"),
+    },
+    async ({ account_id, anchor_balance, anchor_date }) => {
+      const account = db.getAccount(account_id);
+      if (!account) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Account not found" }) }] };
+      }
+
+      if (account.is_investment) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: "Cannot compute balances for investment accounts — their balances depend on market prices, not transaction math. Use import_holdings instead.",
+              }),
+            },
+          ],
+        };
+      }
+
+      const snapshots = db.computeBalancesFromAnchor(account_id, anchor_balance, anchor_date);
+
+      if (snapshots.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ error: "No transactions found for this account to compute balances from" }),
+            },
+          ],
+        };
+      }
+
+      // Save all computed snapshots
+      for (const snap of snapshots) {
+        db.recordBalance(account_id, snap.balance, snap.date, "computed");
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                account: account.name,
+                snapshots_created: snapshots.length,
+                date_range: {
+                  start: snapshots[0].date,
+                  end: snapshots[snapshots.length - 1].date,
+                },
+                anchor: { date: anchor_date, balance: anchor_balance },
+                sample: snapshots.slice(0, 5).concat(
+                  snapshots.length > 5 ? [{ date: "...", balance: 0 }] : []
+                ).concat(
+                  snapshots.length > 5 ? snapshots.slice(-3) : []
+                ),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "import_holdings_csv",
+    "Import investment holdings from a multi-account CSV. Auto-creates accounts, detects asset classes. CSV columns: Institution, Account Name, Account Type, Symbol, Name, Shares, Cost Basis, Current Value, Asset Class.",
+    {
+      file_path: z.string().describe("Path to the holdings CSV file"),
+      as_of: z.string().describe("Date these holdings are as-of (YYYY-MM-DD)"),
+      institution: z.string().optional().describe("Override institution for all accounts"),
+    },
+    async ({ file_path, as_of, institution }) => {
+      try {
+        const result = importHoldingsCSV(db, file_path, as_of, {
+          institution_override: institution,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ error: (e as Error).message }),
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "import_aggregator_csv",
+    "Import multi-account CSV from Mint, Monarch, or similar aggregators. Auto-creates accounts, maps categories. CSV needs: Date, Account, Description, Category, Amount columns.",
+    {
+      file_path: z.string().describe("Path to the aggregator CSV"),
+      skip_accounts: z
+        .array(z.string())
+        .optional()
+        .describe("Account names to skip (e.g., summary/duplicate accounts)"),
+    },
+    async ({ file_path, skip_accounts }) => {
+      try {
+        const result = importAggregatorCSV(db, file_path, { skip_accounts });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ error: (e as Error).message }),
+            },
+          ],
+        };
+      }
     }
   );
 }

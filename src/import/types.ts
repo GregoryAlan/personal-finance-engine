@@ -24,6 +24,7 @@ export interface RawTransaction {
   date: string;
   description: string;
   amount: number;
+  merchant: string;
   category?: string;
   type?: string;
   balance?: string;

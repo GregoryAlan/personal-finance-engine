@@ -100,6 +100,7 @@ export class FinanceDB {
     check_number?: string;
     notes?: string;
     batch_id?: string;
+    merchant?: string;
   }): { id: number; action: "inserted" | "skipped" } {
     const existing = this.db
       .prepare("SELECT id FROM transactions WHERE fingerprint = ?")
@@ -111,8 +112,8 @@ export class FinanceDB {
 
     const result = this.db
       .prepare(
-        `INSERT INTO transactions (account_id, date, description, amount, category_id, fingerprint, institution_category, check_number, notes, batch_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO transactions (account_id, date, description, amount, category_id, fingerprint, institution_category, check_number, notes, batch_id, merchant)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         txn.account_id,
@@ -124,7 +125,8 @@ export class FinanceDB {
         txn.institution_category ?? null,
         txn.check_number ?? null,
         txn.notes ?? null,
-        txn.batch_id ?? null
+        txn.batch_id ?? null,
+        txn.merchant ?? null
       );
     return { id: Number(result.lastInsertRowid), action: "inserted" };
   }
@@ -137,14 +139,24 @@ export class FinanceDB {
     min_amount?: number;
     max_amount?: number;
     description?: string;
+    merchant?: string;
     uncategorized?: boolean;
     group_by?: string;
     limit?: number;
     offset?: number;
+    tags?: string;
+    include_excluded?: boolean;
+    exclude_transfers?: boolean;
   }): { transactions?: Record<string, unknown>[]; groups?: Record<string, unknown>[]; total_count: number } {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (!filters.include_excluded) {
+      conditions.push("t.is_excluded = 0");
+    }
+    if (filters.exclude_transfers) {
+      conditions.push("t.transfer_pair_id IS NULL AND (c.type IS NULL OR c.type != 'transfer')");
+    }
     if (filters.account_id) {
       conditions.push("t.account_id = ?");
       params.push(filters.account_id);
@@ -173,8 +185,16 @@ export class FinanceDB {
       conditions.push("t.description LIKE ?");
       params.push(`%${filters.description}%`);
     }
+    if (filters.merchant) {
+      conditions.push("t.merchant LIKE ?");
+      params.push(`%${filters.merchant}%`);
+    }
     if (filters.uncategorized) {
       conditions.push("t.category_id IS NULL");
+    }
+    if (filters.tags) {
+      conditions.push("t.tags LIKE ?");
+      params.push(`%${filters.tags}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -198,6 +218,10 @@ export class FinanceDB {
         case "description":
           groupCol = "t.description";
           selectCol = "t.description as group_key";
+          break;
+        case "merchant":
+          groupCol = "t.merchant";
+          selectCol = "COALESCE(t.merchant, t.description) as group_key";
           break;
         default:
           groupCol = "c.full_path";
@@ -327,7 +351,7 @@ export class FinanceDB {
       .all() as { id: number; pattern: string; category_id: number; match_type: string; full_path: string }[];
 
     const uncategorized = this.db
-      .prepare("SELECT id, description FROM transactions WHERE category_id IS NULL")
+      .prepare("SELECT id, description FROM transactions WHERE category_id IS NULL AND is_excluded = 0")
       .all() as { id: number; description: string }[];
 
     const updateStmt = this.db.prepare("UPDATE transactions SET category_id = ? WHERE id = ?");
@@ -378,11 +402,11 @@ export class FinanceDB {
     if (groupByDescription) {
       return this.db
         .prepare(
-          `SELECT description, COUNT(*) as count, SUM(amount) as total,
+          `SELECT COALESCE(merchant, description) as merchant, description, COUNT(*) as count, SUM(amount) as total,
             MIN(date) as first_seen, MAX(date) as last_seen
           FROM transactions
-          WHERE category_id IS NULL
-          GROUP BY description
+          WHERE category_id IS NULL AND is_excluded = 0
+          GROUP BY COALESCE(merchant, description)
           ORDER BY count DESC`
         )
         .all() as Record<string, unknown>[];
@@ -393,7 +417,7 @@ export class FinanceDB {
         `SELECT t.*, a.name as account_name
         FROM transactions t
         JOIN accounts a ON t.account_id = a.id
-        WHERE t.category_id IS NULL
+        WHERE t.category_id IS NULL AND t.is_excluded = 0
         ORDER BY t.date DESC
         LIMIT 200`
       )
@@ -690,9 +714,9 @@ export class FinanceDB {
     let typeFilter = "";
     const params: unknown[] = [dateFrom, dateTo];
     if (type === "expense") {
-      typeFilter = "AND t.amount < 0 AND (c.type = 'expense' OR c.type IS NULL)";
+      typeFilter = "AND t.amount < 0 AND (c.type = 'expense' OR c.type IS NULL) AND t.transfer_pair_id IS NULL AND (c.type IS NULL OR c.type != 'transfer')";
     } else if (type === "income") {
-      typeFilter = "AND t.amount > 0 AND c.type = 'income'";
+      typeFilter = "AND t.amount > 0 AND c.type = 'income' AND t.transfer_pair_id IS NULL";
     }
 
     return this.db
@@ -701,7 +725,7 @@ export class FinanceDB {
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON t.account_id = a.id
-        WHERE t.date >= ? AND t.date <= ? ${typeFilter}
+        WHERE t.date >= ? AND t.date <= ? AND t.is_excluded = 0 ${typeFilter}
         ORDER BY t.date DESC`
       )
       .all(...params) as Record<string, unknown>[];
@@ -719,6 +743,8 @@ export class FinanceDB {
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.date >= ? AND t.date <= ?
+          AND t.is_excluded = 0
+          AND t.transfer_pair_id IS NULL
           AND (c.type IS NULL OR c.type != 'transfer')
         GROUP BY substr(t.date, 1, 7)
         ORDER BY month`
@@ -741,6 +767,339 @@ export class FinanceDB {
         ORDER BY bs.as_of`
       )
       .all(`-${months} months`) as Record<string, unknown>[];
+  }
+
+  computeBalancesFromAnchor(
+    accountId: number,
+    anchorBalance: number,
+    anchorDate: string
+  ): { date: string; balance: number }[] {
+    const transactions = this.db
+      .prepare(
+        `SELECT date, amount FROM transactions
+        WHERE account_id = ? AND is_excluded = 0
+        ORDER BY date ASC, id ASC`
+      )
+      .all(accountId) as { date: string; amount: number }[];
+
+    if (transactions.length === 0) return [];
+
+    // Group transactions by month
+    const monthlyNet = new Map<string, number>();
+    for (const txn of transactions) {
+      const month = txn.date.slice(0, 7);
+      monthlyNet.set(month, (monthlyNet.get(month) ?? 0) + txn.amount);
+    }
+
+    const anchorMonth = anchorDate.slice(0, 7);
+    const allMonths = Array.from(monthlyNet.keys()).sort();
+
+    // Ensure anchor month is included
+    if (!monthlyNet.has(anchorMonth)) {
+      allMonths.push(anchorMonth);
+      allMonths.sort();
+    }
+
+    const snapshots: { date: string; balance: number }[] = [];
+
+    // Find anchor month index
+    const anchorIdx = allMonths.indexOf(anchorMonth);
+
+    // Backward pass: from anchor month backward
+    let balance = anchorBalance;
+    for (let i = anchorIdx; i >= 0; i--) {
+      const month = allMonths[i];
+      const lastDay = month + "-" + new Date(
+        parseInt(month.slice(0, 4)),
+        parseInt(month.slice(5, 7)),
+        0
+      ).getDate().toString().padStart(2, "0");
+      const snapshotDate = i === anchorIdx ? anchorDate : lastDay;
+
+      if (i === anchorIdx) {
+        snapshots.push({ date: snapshotDate, balance: Math.round(balance * 100) / 100 });
+      } else {
+        // Subtract this month's net to get end-of-this-month balance
+        // (we already subtracted the next month above, so balance is at end of this month
+        // before next month's transactions)
+        snapshots.push({ date: snapshotDate, balance: Math.round(balance * 100) / 100 });
+      }
+
+      // Subtract this month's transactions to get balance before this month
+      if (i > 0) {
+        balance -= monthlyNet.get(month) ?? 0;
+      }
+    }
+
+    // Forward pass: from anchor month forward
+    balance = anchorBalance;
+    for (let i = anchorIdx + 1; i < allMonths.length; i++) {
+      const month = allMonths[i];
+      balance += monthlyNet.get(month) ?? 0;
+      const lastDay = month + "-" + new Date(
+        parseInt(month.slice(0, 4)),
+        parseInt(month.slice(5, 7)),
+        0
+      ).getDate().toString().padStart(2, "0");
+      snapshots.push({ date: lastDay, balance: Math.round(balance * 100) / 100 });
+    }
+
+    return snapshots.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  // --- Merchant Normalization ---
+
+  renormalizeMerchants(extractMerchant: (desc: string) => string): number {
+    const all = this.db
+      .prepare("SELECT id, description FROM transactions")
+      .all() as { id: number; description: string }[];
+
+    const update = this.db.prepare("UPDATE transactions SET merchant = ? WHERE id = ?");
+    let updated = 0;
+
+    const batch = this.db.transaction(() => {
+      for (const txn of all) {
+        const merchant = extractMerchant(txn.description);
+        update.run(merchant, txn.id);
+        updated++;
+      }
+    });
+
+    batch();
+    return updated;
+  }
+
+  // --- Transaction Editing ---
+
+  getTransaction(id: number): Record<string, unknown> | undefined {
+    return this.db
+      .prepare(
+        `SELECT t.*, c.full_path as category_path, a.name as account_name
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE t.id = ?`
+      )
+      .get(id) as Record<string, unknown> | undefined;
+  }
+
+  updateTransaction(
+    id: number,
+    updates: Record<string, unknown>,
+    editType: string = "update",
+    batchEditId?: string
+  ): void {
+    const txn = this.getTransaction(id);
+    if (!txn) throw new Error(`Transaction ${id} not found`);
+
+    // Preserve original fingerprint on first edit
+    if (!txn.original_fingerprint && txn.fingerprint) {
+      this.db
+        .prepare("UPDATE transactions SET original_fingerprint = fingerprint WHERE id = ? AND original_fingerprint IS NULL")
+        .run(id);
+    }
+
+    const logEdit = this.db.prepare(
+      `INSERT INTO transaction_edits (transaction_id, field_name, old_value, new_value, edit_type, batch_edit_id)
+      VALUES (?, ?, ?, ?, ?, ?)`
+    );
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (["id", "fingerprint", "original_fingerprint", "created_at"].includes(key)) continue;
+      fields.push(`${key} = ?`);
+      values.push(value);
+      logEdit.run(id, key, String(txn[key] ?? ""), String(value ?? ""), editType, batchEditId ?? null);
+    }
+
+    if (fields.length === 0) return;
+    fields.push("updated_at = datetime('now')");
+    values.push(id);
+
+    this.db.prepare(`UPDATE transactions SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  splitTransaction(
+    parentId: number,
+    splits: { description: string; amount: number; category_id?: number; merchant?: string }[]
+  ): number[] {
+    const parent = this.getTransaction(parentId);
+    if (!parent) throw new Error(`Transaction ${parentId} not found`);
+
+    const parentFingerprint = (parent.fingerprint as string) || "";
+    const childIds: number[] = [];
+
+    const doSplit = this.db.transaction(() => {
+      // Preserve original fingerprint
+      if (!parent.original_fingerprint) {
+        this.db
+          .prepare("UPDATE transactions SET original_fingerprint = fingerprint WHERE id = ? AND original_fingerprint IS NULL")
+          .run(parentId);
+      }
+
+      // Mark parent as excluded
+      this.db
+        .prepare("UPDATE transactions SET is_excluded = 1, updated_at = datetime('now') WHERE id = ?")
+        .run(parentId);
+
+      // Log the split
+      this.db
+        .prepare(
+          `INSERT INTO transaction_edits (transaction_id, field_name, old_value, new_value, edit_type)
+          VALUES (?, 'is_excluded', '0', '1', 'split')`
+        )
+        .run(parentId);
+
+      // Insert child transactions
+      for (let i = 0; i < splits.length; i++) {
+        const split = splits[i];
+        const childFingerprint = `${parentFingerprint}:split:${i}`;
+
+        const result = this.db
+          .prepare(
+            `INSERT INTO transactions (account_id, date, description, amount, category_id, fingerprint, parent_id, is_split, merchant, batch_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+          )
+          .run(
+            parent.account_id,
+            parent.date,
+            split.description,
+            split.amount,
+            split.category_id ?? null,
+            childFingerprint,
+            parentId,
+            split.merchant ?? null,
+            parent.batch_id ?? null
+          );
+
+        childIds.push(Number(result.lastInsertRowid));
+      }
+    });
+
+    doSplit();
+    return childIds;
+  }
+
+  unsplitTransaction(parentId: number): void {
+    const parent = this.getTransaction(parentId);
+    if (!parent) throw new Error(`Transaction ${parentId} not found`);
+
+    const doUnsplit = this.db.transaction(() => {
+      // Delete child transactions
+      this.db.prepare("DELETE FROM transactions WHERE parent_id = ?").run(parentId);
+
+      // Restore parent
+      this.db
+        .prepare("UPDATE transactions SET is_excluded = 0, updated_at = datetime('now') WHERE id = ?")
+        .run(parentId);
+
+      this.db
+        .prepare(
+          `INSERT INTO transaction_edits (transaction_id, field_name, old_value, new_value, edit_type)
+          VALUES (?, 'is_excluded', '1', '0', 'restore')`
+        )
+        .run(parentId);
+    });
+
+    doUnsplit();
+  }
+
+  bulkUpdateTransactions(
+    matchDescription: string,
+    updates: Record<string, unknown>
+  ): { updated: number; batch_edit_id: string } {
+    const batchEditId = `bulk_${Date.now()}`;
+    const matching = this.db
+      .prepare("SELECT id FROM transactions WHERE description LIKE ? AND is_excluded = 0")
+      .all(`%${matchDescription}%`) as { id: number }[];
+
+    const doBulk = this.db.transaction(() => {
+      for (const txn of matching) {
+        this.updateTransaction(txn.id, updates, "bulk", batchEditId);
+      }
+    });
+
+    doBulk();
+    return { updated: matching.length, batch_edit_id: batchEditId };
+  }
+
+  getTransactionEditHistory(transactionId: number): Record<string, unknown>[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM transaction_edits WHERE transaction_id = ? ORDER BY created_at DESC`
+      )
+      .all(transactionId) as Record<string, unknown>[];
+  }
+
+  // --- Transfer Detection ---
+
+  linkTransferPair(idA: number, idB: number, categoryId?: number): void {
+    const doLink = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE transactions SET transfer_pair_id = ?, category_id = COALESCE(?, category_id), updated_at = datetime('now') WHERE id = ?")
+        .run(idB, categoryId ?? null, idA);
+      this.db
+        .prepare("UPDATE transactions SET transfer_pair_id = ?, category_id = COALESCE(?, category_id), updated_at = datetime('now') WHERE id = ?")
+        .run(idA, categoryId ?? null, idB);
+    });
+    doLink();
+  }
+
+  unlinkTransferPair(transactionId: number): void {
+    const txn = this.getTransaction(transactionId);
+    if (!txn || !txn.transfer_pair_id) return;
+
+    const pairedId = txn.transfer_pair_id as number;
+
+    const doUnlink = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE transactions SET transfer_pair_id = NULL, updated_at = datetime('now') WHERE id = ?")
+        .run(transactionId);
+      this.db
+        .prepare("UPDATE transactions SET transfer_pair_id = NULL, updated_at = datetime('now') WHERE id = ?")
+        .run(pairedId);
+    });
+    doUnlink();
+  }
+
+  getUnlinkedTransactions(dateFrom?: string, dateTo?: string): Record<string, unknown>[] {
+    const conditions = ["t.transfer_pair_id IS NULL", "t.is_excluded = 0"];
+    const params: unknown[] = [];
+    if (dateFrom) {
+      conditions.push("t.date >= ?");
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      conditions.push("t.date <= ?");
+      params.push(dateTo);
+    }
+
+    return this.db
+      .prepare(
+        `SELECT t.*, a.name as account_name, a.type as account_type
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY t.date, ABS(t.amount) DESC`
+      )
+      .all(...params) as Record<string, unknown>[];
+  }
+
+  getLinkedTransfers(): Record<string, unknown>[] {
+    return this.db
+      .prepare(
+        `SELECT t1.id as id_a, t1.date as date_a, t1.description as desc_a, t1.amount as amount_a, a1.name as account_a,
+                t2.id as id_b, t2.date as date_b, t2.description as desc_b, t2.amount as amount_b, a2.name as account_b
+        FROM transactions t1
+        JOIN transactions t2 ON t1.transfer_pair_id = t2.id
+        JOIN accounts a1 ON t1.account_id = a1.id
+        JOIN accounts a2 ON t2.account_id = a2.id
+        WHERE t1.id < t2.id
+        ORDER BY t1.date DESC`
+      )
+      .all() as Record<string, unknown>[];
   }
 
   close(): void {

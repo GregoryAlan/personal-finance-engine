@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { parseDate } from "../utils/dates.js";
+import { extractMerchant } from "./merchant.js";
 import type { ImportConfig, RawTransaction } from "./types.js";
 
 export function normalizeTransaction(
@@ -50,8 +51,9 @@ export function normalizeTransaction(
   const check_number = cols.check_number ? row[cols.check_number]?.trim() : undefined;
 
   const rawLine = Object.values(row).join(",");
+  const merchant = extractMerchant(description);
 
-  return { date, description, amount, category, type, balance, check_number, raw_line: rawLine };
+  return { date, description, amount, merchant, category, type, balance, check_number, raw_line: rawLine };
 }
 
 export function generateFingerprint(

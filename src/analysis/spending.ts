@@ -92,7 +92,7 @@ export function analyzeSpending(
   // Top merchants
   const merchantMap = new Map<string, { total: number; count: number }>();
   for (const t of filtered) {
-    const desc = (t.description as string) || "Unknown";
+    const desc = (t.merchant as string) || (t.description as string) || "Unknown";
     const amt = Math.abs((t.amount as number) || 0);
     if (!merchantMap.has(desc)) {
       merchantMap.set(desc, { total: 0, count: 0 });

@@ -130,6 +130,8 @@ export function initializeSchema(db: Database.Database): void {
     seedCategories(db);
     seedDefaultRules(db);
   }
+
+  runMigrations(db);
 }
 
 function seedCategories(db: Database.Database): void {
@@ -157,6 +159,57 @@ function seedCategories(db: Database.Database): void {
   });
 
   seed();
+}
+
+function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return cols.some((c) => c.name === column);
+}
+
+function runMigrations(db: Database.Database): void {
+  // Phase 1: Merchant normalization
+  if (!hasColumn(db, "transactions", "merchant")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN merchant TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_transactions_merchant ON transactions(merchant)");
+  }
+
+  // Phase 2: Transaction editing
+  if (!hasColumn(db, "transactions", "tags")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN tags TEXT");
+  }
+  if (!hasColumn(db, "transactions", "is_excluded")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN is_excluded INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "transactions", "original_fingerprint")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN original_fingerprint TEXT");
+  }
+  if (!hasColumn(db, "transactions", "parent_id")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN parent_id INTEGER REFERENCES transactions(id)");
+  }
+  if (!hasColumn(db, "transactions", "is_split")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN is_split INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "transactions", "updated_at")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN updated_at TEXT");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS transaction_edits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      field_name TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      edit_type TEXT NOT NULL CHECK(edit_type IN ('update','split','exclude','restore','bulk')),
+      batch_edit_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_edits_transaction ON transaction_edits(transaction_id);
+    CREATE INDEX IF NOT EXISTS idx_edits_batch ON transaction_edits(batch_edit_id);
+  `);
+
+  // Phase 3: Transfer detection
+  db.exec("CREATE INDEX IF NOT EXISTS idx_transactions_transfer_pair ON transactions(transfer_pair_id)");
 }
 
 function seedDefaultRules(db: Database.Database): void {

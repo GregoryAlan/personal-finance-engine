@@ -9,6 +9,8 @@ import {
 import { analyzeSpending } from "../analysis/spending.js";
 import { calculateNetWorthHistory } from "../analysis/networth.js";
 import { detectRecurring } from "../analysis/recurring.js";
+import { detectTransfers } from "../analysis/transfers.js";
+import { extractMerchant } from "../import/merchant.js";
 import { addMonths, today } from "../utils/dates.js";
 
 export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
@@ -170,6 +172,11 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
           "assign",
           "list_rules",
           "list_categories",
+          "renormalize",
+          "detect_transfers",
+          "link_transfer",
+          "unlink_transfer",
+          "list_transfers",
         ])
         .describe("Action to perform"),
       group_by_description: z
@@ -194,6 +201,26 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         .enum(["expense", "income", "transfer"])
         .optional()
         .describe("For list_categories: filter by type"),
+      date_window_days: z
+        .number()
+        .optional()
+        .describe("For detect_transfers: max days between matching transactions (default 3)"),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe("For detect_transfers: preview matches without linking"),
+      transaction_id_a: z
+        .number()
+        .optional()
+        .describe("For link_transfer: first transaction ID"),
+      transaction_id_b: z
+        .number()
+        .optional()
+        .describe("For link_transfer: second transaction ID"),
+      transaction_id: z
+        .number()
+        .optional()
+        .describe("For unlink_transfer: transaction ID to unlink"),
     },
     async ({
       action,
@@ -204,6 +231,11 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
       priority,
       transaction_ids,
       category_type,
+      date_window_days,
+      dry_run,
+      transaction_id_a,
+      transaction_id_b,
+      transaction_id,
     }) => {
       if (action === "list_uncategorized") {
         const result = db.listUncategorized(group_by_description);
@@ -347,9 +379,136 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         };
       }
 
+      if (action === "renormalize") {
+        const updated = db.renormalizeMerchants(extractMerchant);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ renormalized: updated }, null, 2),
+            },
+          ],
+        };
+      }
+
+      if (action === "detect_transfers") {
+        const result = detectTransfers(db, { dateWindowDays: date_window_days, dryRun: dry_run });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      if (action === "link_transfer") {
+        if (!transaction_id_a || !transaction_id_b) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: "transaction_id_a and transaction_id_b required" }),
+              },
+            ],
+          };
+        }
+
+        const txnA = db.getTransaction(transaction_id_a);
+        const txnB = db.getTransaction(transaction_id_b);
+        if (!txnA || !txnB) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: "One or both transactions not found" }),
+              },
+            ],
+          };
+        }
+
+        // Determine transfer category
+        const categoryId = getTransferCategoryId(db, txnA, txnB);
+        db.linkTransferPair(transaction_id_a, transaction_id_b, categoryId);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                linked: {
+                  a: { id: transaction_id_a, description: txnA.description, amount: txnA.amount, account: txnA.account_name },
+                  b: { id: transaction_id_b, description: txnB.description, amount: txnB.amount, account: txnB.account_name },
+                },
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      if (action === "unlink_transfer") {
+        if (!transaction_id) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: "transaction_id required" }),
+              },
+            ],
+          };
+        }
+        db.unlinkTransferPair(transaction_id);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ unlinked: transaction_id }),
+            },
+          ],
+        };
+      }
+
+      if (action === "list_transfers") {
+        const transfers = db.getLinkedTransfers();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ count: transfers.length, transfers }, null, 2),
+            },
+          ],
+        };
+      }
+
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }],
       };
     }
   );
+}
+
+function getTransferCategoryId(
+  db: FinanceDB,
+  txnA: Record<string, unknown>,
+  txnB: Record<string, unknown>
+): number | undefined {
+  // Determine the right transfer subcategory
+  const accountA = db.getAccount(txnA.account_id as number);
+  const accountB = db.getAccount(txnB.account_id as number);
+  if (!accountA || !accountB) return undefined;
+
+  let categoryPath: string;
+  if (accountA.type === "credit_card" || accountB.type === "credit_card") {
+    categoryPath = "Transfer > Credit Card Payment";
+  } else if (
+    accountA.is_investment || accountB.is_investment
+  ) {
+    categoryPath = "Transfer > Investment Contribution";
+  } else {
+    categoryPath = "Transfer > Account Transfer";
+  }
+
+  const cat = db.getCategoryByPath(categoryPath);
+  return cat?.id;
 }

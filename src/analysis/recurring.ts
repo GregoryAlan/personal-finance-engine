@@ -24,10 +24,10 @@ export function detectRecurring(db: FinanceDB, lookbackMonths: number = 6): Recu
   const dateFrom = addMonths(today(), -lookbackMonths);
   const dateTo = today();
 
-  // Get all transactions grouped by normalized description
+  // Get all transactions grouped by merchant (or description as fallback)
   const grouped = db.db
     .prepare(
-      `SELECT description,
+      `SELECT COALESCE(merchant, description) as description,
         COUNT(*) as count,
         AVG(amount) as avg_amount,
         MIN(amount) as min_amount,
@@ -37,8 +37,8 @@ export function detectRecurring(db: FinanceDB, lookbackMonths: number = 6): Recu
         GROUP_CONCAT(date, ',') as dates,
         GROUP_CONCAT(amount, ',') as amounts
       FROM transactions
-      WHERE date >= ? AND date <= ?
-      GROUP BY description
+      WHERE date >= ? AND date <= ? AND is_excluded = 0
+      GROUP BY COALESCE(merchant, description)
       HAVING COUNT(*) >= 2
       ORDER BY COUNT(*) DESC`
     )
