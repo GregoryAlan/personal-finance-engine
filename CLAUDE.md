@@ -101,7 +101,7 @@ forecast type="cash_flow" adjustments=[{description: "Side gig", monthly_amount:
 scenario name="Cut subscriptions" adjustments=[{type: "stop_recurring", description: "Netflix", amount: 15.99}, {type: "stop_recurring", description: "Spotify", amount: 12.99}] savings_target=10000
 ```
 
-## Tools Reference (14 total)
+## Tools Reference (15 total)
 
 ### Data Management
 | Tool | Purpose |
@@ -111,6 +111,7 @@ scenario name="Cut subscriptions" adjustments=[{type: "stop_recurring", descript
 | `import_holdings` | Import investment positions |
 | `categorize` | Manage rules, assign categories, detect transfers, renormalize merchants |
 | `edit_transaction` | Update, split, exclude, bulk-update, view history |
+| `query_sql` | Raw SQL access — reads return rows, writes return changes count |
 
 ### Queries
 | Tool | Purpose |
@@ -132,6 +133,18 @@ scenario name="Cut subscriptions" adjustments=[{type: "stop_recurring", descript
 |------|---------|
 | `forecast` | Project cash flow or net worth forward |
 | `scenario` | What-if modeling with baseline comparison |
+
+### Direct SQL Access
+```
+query_sql sql="SELECT name FROM sqlite_master WHERE type='table'"
+query_sql sql="SELECT * FROM transactions WHERE amount < ? AND date > ?" params=[-500, "2025-01-01"] limit=10
+query_sql sql="UPDATE transactions SET notes='reviewed' WHERE id=42"
+query_sql sql="DELETE FROM transactions WHERE import_batch = 'bad-batch-id'"
+query_sql sql="PRAGMA table_info('transactions')"
+query_sql sql="CREATE TABLE foo (id INTEGER PRIMARY KEY); INSERT INTO foo VALUES (1);" multi=true
+```
+
+Use for manual inserts, bulk fixes, schema inspection, or any query the pre-built tools don't cover.
 
 ## Key Design Decisions
 
