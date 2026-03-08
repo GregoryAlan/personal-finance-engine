@@ -20,8 +20,8 @@ export function registerSqlTools(server: McpServer, db: FinanceDB): void {
       limit: z
         .number()
         .optional()
-        .default(1000)
-        .describe("Max rows returned for SELECTs. 0 = unlimited. Default 1000"),
+        .default(100)
+        .describe("Max rows returned for SELECTs. 0 = unlimited. Default 100"),
       multi: z
         .boolean()
         .optional()

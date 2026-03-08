@@ -419,7 +419,7 @@ export class FinanceDB {
         JOIN accounts a ON t.account_id = a.id
         WHERE t.category_id IS NULL AND t.is_excluded = 0
         ORDER BY t.date DESC
-        LIMIT 200`
+        LIMIT 50`
       )
       .all() as Record<string, unknown>[];
   }
