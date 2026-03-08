@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { FinanceDB } from "../db/database.js";
 import { addMonths, today } from "../utils/dates.js";
 import { roundMoney } from "../utils/money.js";
+import { jsonResponse, tableResponse } from "../utils/response.js";
+import { formatTable } from "../utils/table.js";
 
 export function registerProjectTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -31,6 +33,7 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Monthly investment contribution amount added to investment balance each month"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ type, months: forecastMonths, adjustments, investment_return, monthly_contribution }) => {
       const numMonths = forecastMonths ?? 12;
       const recurring = db.getRecurringPatterns();
@@ -162,46 +165,44 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         ? projection[projection.length - 1].net_worth
         : undefined;
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                forecast_type: type,
-                months: numMonths,
-                baseline: {
-                  monthly_income: roundMoney(baselineMonthlyIncome),
-                  monthly_expenses: roundMoney(baselineMonthlyExpenses),
-                  monthly_net: roundMoney(baselineMonthlyIncome - baselineMonthlyExpenses),
-                  source: recurring.length > 0 ? "recurring_patterns" : "recent_averages",
-                },
-                current_net_worth: type === "net_worth" ? roundMoney(currentNetWorth) : undefined,
-                investment_assumptions: (investment_return || monthlyContrib)
-                  ? {
-                      annual_return_pct: investment_return ?? 0,
-                      monthly_contribution: monthlyContrib,
-                      starting_investment_balance: roundMoney(currentInvestmentBalance),
-                    }
-                  : undefined,
-                projection,
-                end_state: {
-                  total_saved: roundMoney(cumulativeNet),
-                  projected_net_worth: endNetWorth,
-                  total_investment_growth: (investment_return || monthlyContrib)
-                    ? roundMoney(totalInvestmentGrowth)
-                    : undefined,
-                  projected_investment_balance: (investment_return || monthlyContrib)
-                    ? roundMoney(investmentBalance)
-                    : undefined,
-                },
-              },
-              null,
-              2
-            ),
-          },
-        ],
+      const summary: Record<string, unknown> = {
+        forecast_type: type,
+        months: numMonths,
+        baseline: {
+          monthly_income: roundMoney(baselineMonthlyIncome),
+          monthly_expenses: roundMoney(baselineMonthlyExpenses),
+          monthly_net: roundMoney(baselineMonthlyIncome - baselineMonthlyExpenses),
+          source: recurring.length > 0 ? "recurring_patterns" : "recent_averages",
+        },
+        current_net_worth: type === "net_worth" ? roundMoney(currentNetWorth) : undefined,
+        investment_assumptions: (investment_return || monthlyContrib)
+          ? {
+              annual_return_pct: investment_return ?? 0,
+              monthly_contribution: monthlyContrib,
+              starting_investment_balance: roundMoney(currentInvestmentBalance),
+            }
+          : undefined,
+        end_state: {
+          total_saved: roundMoney(cumulativeNet),
+          projected_net_worth: endNetWorth,
+          total_investment_growth: (investment_return || monthlyContrib)
+            ? roundMoney(totalInvestmentGrowth)
+            : undefined,
+          projected_investment_balance: (investment_return || monthlyContrib)
+            ? roundMoney(investmentBalance)
+            : undefined,
+        },
       };
+
+      // Build table columns based on forecast type
+      const tableColumns = type === "net_worth"
+        ? ["month", "income", "expenses", "net", "net_worth", "investment_balance"]
+        : ["month", "income", "expenses", "net", "cumulative_net"];
+
+      return tableResponse(
+        summary,
+        formatTable(projection as unknown as Record<string, unknown>[], { columns: tableColumns })
+      );
     }
   );
 
@@ -238,6 +239,7 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Baseline annual investment return % (e.g., 7). Applied to both baseline and scenario unless overridden."),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ name, months: scenarioMonths, adjustments, savings_target, investment_return }) => {
       const numMonths = scenarioMonths ?? 12;
 
@@ -392,8 +394,6 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
               starting_investment_balance: roundMoney(investmentBalance),
             }
           : undefined,
-        baseline,
-        scenario,
         comparison: {
           baseline_total_saved: roundMoney(baselineCum),
           scenario_total_saved: roundMoney(scenarioCum),
@@ -427,14 +427,17 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         };
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      // Build comparison table: baseline vs scenario side by side
+      const tableColumns = investment_return || scenarioExtraContrib
+        ? ["month", "net", "cumulative", "investment_balance"]
+        : ["month", "net", "cumulative"];
+
+      const tables = [
+        "## Baseline\n" + formatTable(baseline as unknown as Record<string, unknown>[], { columns: tableColumns }),
+        "## Scenario\n" + formatTable(scenario as unknown as Record<string, unknown>[], { columns: tableColumns }),
+      ];
+
+      return tableResponse(result, tables.join("\n\n"));
     }
   );
 }

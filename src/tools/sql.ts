@@ -1,13 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FinanceDB } from "../db/database.js";
+import { jsonResponse, errorResponse, tableResponse } from "../utils/response.js";
+import { formatTable } from "../utils/table.js";
 
 export function registerSqlTools(server: McpServer, db: FinanceDB): void {
   server.tool(
     "query_sql",
-    "Execute raw SQL against the finance database. Reads auto-detect via statement type and return rows; writes return changes count. Use params array for ? placeholders. Use multi=true for multi-statement scripts (no params, no results).",
+    "Execute raw SQL against the finance database. Reads auto-detect via statement type and return rows; writes return changes count. Use params array for ? placeholders. Use multi=true for multi-statement scripts (no params, no results). Use schema=true to inspect all table schemas.",
     {
-      sql: z.string().describe("SQL statement to execute"),
+      sql: z
+        .string()
+        .optional()
+        .describe("SQL statement to execute (optional when schema=true)"),
       params: z
         .array(z.union([z.string(), z.number(), z.null(), z.boolean()]))
         .optional()
@@ -23,19 +28,59 @@ export function registerSqlTools(server: McpServer, db: FinanceDB): void {
         .describe(
           "Use db.exec() for multi-statement scripts (DDL/migrations). No params, no results returned."
         ),
+      schema: z
+        .boolean()
+        .optional()
+        .describe("Return all table schemas instead of executing SQL"),
     },
-    async ({ sql, params, limit, multi }) => {
+    { destructiveHint: true, openWorldHint: false },
+    async ({ sql, params, limit, multi, schema }) => {
       try {
+        if (schema) {
+          const tables = db.db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+            .all() as { name: string }[];
+
+          const sections: string[] = [];
+          for (const t of tables) {
+            const cols = db.db
+              .prepare(`PRAGMA table_info('${t.name}')`)
+              .all() as {
+              name: string;
+              type: string;
+              notnull: number;
+              pk: number;
+            }[];
+
+            const tableStr = formatTable(
+              cols.map((c) => ({
+                column: c.name,
+                type: c.type || "ANY",
+                nullable: c.notnull ? "no" : "yes",
+                pk: c.pk ? "yes" : "",
+              })),
+              { columns: ["column", "type", "nullable", "pk"] }
+            );
+            sections.push(
+              `== ${t.name} (${cols.length} columns) ==\n${tableStr}`
+            );
+          }
+
+          return tableResponse(
+            { table_count: tables.length, tables: tables.map((t) => t.name) },
+            sections.join("\n\n")
+          );
+        }
+
+        if (!sql) {
+          return errorResponse("sql parameter is required when schema is not set");
+        }
+
         if (multi) {
           db.db.exec(sql);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ success: true }, null, 2),
-              },
-            ],
-          };
+          return jsonResponse({ success: true });
         }
 
         // Convert boolean params to 1/0 for SQLite
@@ -52,56 +97,20 @@ export function registerSqlTools(server: McpServer, db: FinanceDB): void {
           const columns =
             resultRows.length > 0 ? Object.keys(resultRows[0]) : [];
 
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    columns,
-                    rows: resultRows,
-                    row_count: resultRows.length,
-                    truncated,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
+          return tableResponse(
+            { columns, row_count: resultRows.length, truncated },
+            formatTable(resultRows)
+          );
         } else {
           const result = stmt.run(...bindParams);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    changes: result.changes,
-                    last_insert_rowid: Number(result.lastInsertRowid),
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
+          return jsonResponse({
+            changes: result.changes,
+            last_insert_rowid: Number(result.lastInsertRowid),
+          });
         }
       } catch (err: unknown) {
         const error = err as Error & { code?: string };
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                { error: error.message, code: error.code ?? "UNKNOWN" },
-                null,
-                2
-              ),
-            },
-          ],
-          isError: true,
-        };
+        return errorResponse(error.message, { code: error.code ?? "UNKNOWN" });
       }
     }
   );

@@ -11,6 +11,7 @@ import type { ImportConfig } from "../import/types.js";
 import { importAggregatorCSV } from "../import/aggregator.js";
 import { classifyAsset } from "../import/asset-classes.js";
 import { importHoldingsCSV } from "../import/holdings-csv.js";
+import { jsonResponse, errorResponse } from "../utils/response.js";
 
 export function registerImportTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -41,26 +42,23 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Set true if positive amounts are charges (like Amex/Discover)"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ file_path, account_id, institution, column_mapping, invert_amount }) => {
       const account = db.getAccount(account_id);
       if (!account) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Account not found", account_id }) }] };
+        return errorResponse("Account not found", { account_id });
       }
 
       let content: string;
       try {
         content = readFileSync(file_path, "utf-8");
       } catch (e) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Cannot read file: ${file_path}` }) }],
-        };
+        return errorResponse(`Cannot read file: ${file_path}`);
       }
 
       const { headers, rows } = parseCSV(content);
       if (rows.length === 0) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: "No data rows found in CSV", headers }) }],
-        };
+        return errorResponse("No data rows found in CSV", { headers });
       }
 
       // Determine mapping
@@ -79,20 +77,12 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
       }
 
       if (!config) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: "Could not auto-detect CSV format",
-                headers,
-                hint: "Provide institution name or column_mapping parameter. Available institutions: " +
-                  INSTITUTION_MAPPINGS.map((m) => m.institution).join(", "),
-                sample_row: rows[0],
-              }),
-            },
-          ],
-        };
+        return errorResponse("Could not auto-detect CSV format", {
+          headers,
+          hint: "Provide institution name or column_mapping parameter. Available institutions: " +
+            INSTITUTION_MAPPINGS.map((m) => m.institution).join(", "),
+          sample_row: rows[0],
+        });
       }
 
       const batchId = randomUUID().slice(0, 8);
@@ -169,29 +159,18 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         date_range_end: dateMax !== "0000" ? dateMax : undefined,
       });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                batch_id: batchId,
-                institution: config.institution,
-                account: account.name,
-                imported,
-                skipped,
-                errors: errors.length,
-                error_details: errors.slice(0, 10),
-                date_range: dateMin !== "9999" ? { start: dateMin, end: dateMax } : null,
-                auto_categorized: catResult.updated,
-                rules_applied: catResult.rules_applied,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        batch_id: batchId,
+        institution: config.institution,
+        account: account.name,
+        imported,
+        skipped,
+        errors: errors.length,
+        error_details: errors.slice(0, 10),
+        date_range: dateMin !== "9999" ? { start: dateMin, end: dateMax } : null,
+        auto_categorized: catResult.updated,
+        rules_applied: catResult.rules_applied,
+      });
     }
   );
 
@@ -219,19 +198,16 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
       balance: z.number().optional().describe("Current balance to record"),
       balance_date: z.string().optional().describe("Date for balance snapshot (defaults to today)"),
     },
+    { openWorldHint: false },
     async ({ action, name, institution, type, is_asset, is_investment, account_id, updates, balance, balance_date }) => {
       if (action === "list") {
         const accounts = db.listAccounts();
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ accounts }, null, 2) }],
-        };
+        return jsonResponse({ accounts });
       }
 
       if (action === "create") {
         if (!name || !type) {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: "name and type are required for create" }) }],
-          };
+          return errorResponse("name and type are required for create");
         }
 
         // Auto-set is_asset based on type
@@ -255,21 +231,12 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           db.recordBalance(id, balance, balance_date || new Date().toISOString().slice(0, 10));
         }
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ created: { id, name, type, institution, is_asset: autoIsAsset, is_investment: autoIsInvestment } }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ created: { id, name, type, institution, is_asset: autoIsAsset, is_investment: autoIsInvestment } });
       }
 
       if (action === "update") {
         if (!account_id) {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: "account_id required for update" }) }],
-          };
+          return errorResponse("account_id required for update");
         }
         if (updates) {
           db.updateAccount(account_id, updates);
@@ -278,12 +245,10 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           db.recordBalance(account_id, balance, balance_date || new Date().toISOString().slice(0, 10));
         }
         const updated = db.getAccount(account_id);
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ updated }, null, 2) }],
-        };
+        return jsonResponse({ updated });
       }
 
-      return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }] };
+      return errorResponse("Unknown action");
     }
   );
 
@@ -310,10 +275,11 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Manual holdings array"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ account_id, as_of, file_path, holdings: manualHoldings }) => {
       const account = db.getAccount(account_id);
       if (!account) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Account not found" }) }] };
+        return errorResponse("Account not found");
       }
 
       let holdingsToImport: {
@@ -332,7 +298,7 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         try {
           content = readFileSync(file_path, "utf-8");
         } catch {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Cannot read file: ${file_path}` }) }] };
+          return errorResponse(`Cannot read file: ${file_path}`);
         }
 
         const { headers, rows } = parseCSV(content);
@@ -345,18 +311,10 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         const valueCol = headers.find((h) => /current.?value|market.?value|value/i.test(h));
 
         if (!symbolCol) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "Could not detect Symbol column",
-                  headers,
-                  sample_row: rows[0],
-                }),
-              },
-            ],
-          };
+          return errorResponse("Could not detect Symbol column", {
+            headers,
+            sample_row: rows[0],
+          });
         }
 
         for (const row of rows) {
@@ -378,9 +336,7 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           });
         }
       } else {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: "Provide file_path or holdings array" }) }],
-        };
+        return errorResponse("Provide file_path or holdings array");
       }
 
       // Auto-classify asset classes
@@ -413,31 +369,20 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         }))
         .sort((a, b) => b.value - a.value);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                account: account.name,
-                as_of,
-                positions_imported: count,
-                total_value: Math.round(totalValue * 100) / 100,
-                holdings: holdingsToImport.map((h) => ({
-                  symbol: h.symbol,
-                  shares: h.shares,
-                  value: h.current_value,
-                  asset_class: h.asset_class ?? "other",
-                })),
-                allocation_summary,
-                unclassified: unclassified.length > 0 ? unclassified : undefined,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        account: account.name,
+        as_of,
+        positions_imported: count,
+        total_value: Math.round(totalValue * 100) / 100,
+        holdings: holdingsToImport.map((h) => ({
+          symbol: h.symbol,
+          shares: h.shares,
+          value: h.current_value,
+          asset_class: h.asset_class ?? "other",
+        })),
+        allocation_summary,
+        unclassified: unclassified.length > 0 ? unclassified : undefined,
+      });
     }
   );
 
@@ -456,8 +401,9 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         )
         .describe("Array of account balances to record"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ balances }) => {
-      const today = new Date().toISOString().slice(0, 10);
+      const todayStr = new Date().toISOString().slice(0, 10);
       const results: { account: string; balance: number; date: string }[] = [];
       const notFound: string[] = [];
 
@@ -474,7 +420,7 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
           continue;
         }
 
-        const date = entry.date ?? today;
+        const date = entry.date ?? todayStr;
         db.recordBalance(account.id as number, entry.balance, date, "manual");
         results.push({
           account: account.name as string,
@@ -483,22 +429,11 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         });
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                recorded: results.length,
-                snapshots: results,
-                not_found: notFound.length > 0 ? notFound : undefined,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        recorded: results.length,
+        snapshots: results,
+        not_found: notFound.length > 0 ? notFound : undefined,
+      });
     }
   );
 
@@ -510,36 +445,21 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
       anchor_balance: z.number().describe("Known balance at anchor_date"),
       anchor_date: z.string().describe("Date of the known balance (YYYY-MM-DD)"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ account_id, anchor_balance, anchor_date }) => {
       const account = db.getAccount(account_id);
       if (!account) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Account not found" }) }] };
+        return errorResponse("Account not found");
       }
 
       if (account.is_investment) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: "Cannot compute balances for investment accounts — their balances depend on market prices, not transaction math. Use import_holdings instead.",
-              }),
-            },
-          ],
-        };
+        return errorResponse("Cannot compute balances for investment accounts — their balances depend on market prices, not transaction math. Use import_holdings instead.");
       }
 
       const snapshots = db.computeBalancesFromAnchor(account_id, anchor_balance, anchor_date);
 
       if (snapshots.length === 0) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ error: "No transactions found for this account to compute balances from" }),
-            },
-          ],
-        };
+        return errorResponse("No transactions found for this account to compute balances from");
       }
 
       // Save all computed snapshots
@@ -547,31 +467,20 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         db.recordBalance(account_id, snap.balance, snap.date, "computed");
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                account: account.name,
-                snapshots_created: snapshots.length,
-                date_range: {
-                  start: snapshots[0].date,
-                  end: snapshots[snapshots.length - 1].date,
-                },
-                anchor: { date: anchor_date, balance: anchor_balance },
-                sample: snapshots.slice(0, 5).concat(
-                  snapshots.length > 5 ? [{ date: "...", balance: 0 }] : []
-                ).concat(
-                  snapshots.length > 5 ? snapshots.slice(-3) : []
-                ),
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        account: account.name,
+        snapshots_created: snapshots.length,
+        date_range: {
+          start: snapshots[0].date,
+          end: snapshots[snapshots.length - 1].date,
+        },
+        anchor: { date: anchor_date, balance: anchor_balance },
+        sample: snapshots.slice(0, 5).concat(
+          snapshots.length > 5 ? [{ date: "...", balance: 0 }] : []
+        ).concat(
+          snapshots.length > 5 ? snapshots.slice(-3) : []
+        ),
+      });
     }
   );
 
@@ -583,28 +492,15 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
       as_of: z.string().describe("Date these holdings are as-of (YYYY-MM-DD)"),
       institution: z.string().optional().describe("Override institution for all accounts"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ file_path, as_of, institution }) => {
       try {
         const result = importHoldingsCSV(db, file_path, as_of, {
           institution_override: institution,
         });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(result);
       } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ error: (e as Error).message }),
-            },
-          ],
-        };
+        return errorResponse((e as Error).message);
       }
     }
   );
@@ -619,26 +515,13 @@ export function registerImportTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Account names to skip (e.g., summary/duplicate accounts)"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ file_path, skip_accounts }) => {
       try {
         const result = importAggregatorCSV(db, file_path, { skip_accounts });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(result);
       } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ error: (e as Error).message }),
-            },
-          ],
-        };
+        return errorResponse((e as Error).message);
       }
     }
   );

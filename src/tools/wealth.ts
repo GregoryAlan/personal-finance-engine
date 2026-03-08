@@ -9,6 +9,7 @@ import {
   decomposeContributionsVsGrowth,
   checkMilestones,
 } from "../analysis/wealth.js";
+import { jsonResponse, errorResponse } from "../utils/response.js";
 
 function periodToDateRange(period: string): { from: string; to: string } {
   const to = today();
@@ -60,6 +61,7 @@ export function registerWealthTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Include suggested rebalance trades"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ as_of, period, include_drift, include_rebalance }) => {
       const asOf = as_of || today();
       const { from: dateFrom, to: dateTo } = periodToDateRange(period || "1y");
@@ -166,14 +168,7 @@ export function registerWealthTools(server: McpServer, db: FinanceDB): void {
         result.milestones = milestones;
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      return jsonResponse(result);
     }
   );
 
@@ -199,121 +194,55 @@ export function registerWealthTools(server: McpServer, db: FinanceDB): void {
         .describe("For set_target: target allocations (must sum to 100)"),
       as_of: z.string().optional().describe("Snapshot date for drift calculation"),
     },
+    { openWorldHint: false },
     async ({ action, target_name, targets, as_of }) => {
       const name = target_name || "default";
 
       if (action === "view") {
         const holdingsResult = db.getHoldings({ group_by: "asset_class", as_of: as_of });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  as_of: as_of || "latest",
-                  total_value: roundMoney(holdingsResult.total_value),
-                  allocation: (holdingsResult.groups || []).map((g) => ({
-                    asset_class: g.group_key,
-                    value: roundMoney((g.total_value as number) || 0),
-                    pct: g.allocation_pct,
-                  })),
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({
+          as_of: as_of || "latest",
+          total_value: roundMoney(holdingsResult.total_value),
+          allocation: (holdingsResult.groups || []).map((g) => ({
+            asset_class: g.group_key,
+            value: roundMoney((g.total_value as number) || 0),
+            pct: g.allocation_pct,
+          })),
+        });
       }
 
       if (action === "set_target") {
         if (!targets || targets.length === 0) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "targets array required" }),
-              },
-            ],
-          };
+          return errorResponse("targets array required");
         }
 
         const sum = targets.reduce((s, t) => s + t.target_pct, 0);
         if (Math.abs(sum - 100) > 0.01) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: `Target percentages must sum to 100, got ${roundMoney(sum)}`,
-                }),
-              },
-            ],
-          };
+          return errorResponse(`Target percentages must sum to 100, got ${roundMoney(sum)}`);
         }
 
         db.setAllocationTargets(name, targets);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  saved: { name, targets },
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({ saved: { name, targets } });
       }
 
       if (action === "view_targets") {
         const allTargets = db.getAllocationTargets(target_name);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  profiles: allTargets.length > 0 ? allTargets : "No allocation targets set",
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({
+          profiles: allTargets.length > 0 ? allTargets : "No allocation targets set",
+        });
       }
 
       if (action === "drift") {
         const driftResult = calculateAllocationDrift(db, name, as_of);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(driftResult, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(driftResult);
       }
 
       if (action === "delete_target") {
         const deleted = db.deleteAllocationTargets(name);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ deleted_count: deleted, profile: name }),
-            },
-          ],
-        };
+        return jsonResponse({ deleted_count: deleted, profile: name });
       }
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }],
-      };
+      return errorResponse("Unknown action");
     }
   );
 
@@ -336,32 +265,15 @@ export function registerWealthTools(server: McpServer, db: FinanceDB): void {
         .describe("Account ID (required if target_type is 'account')"),
       milestone_id: z.number().optional().describe("Milestone ID (for delete)"),
     },
+    { openWorldHint: false },
     async ({ action, name, target_amount, target_type, account_id, milestone_id }) => {
       if (action === "create") {
         if (!name || target_amount === undefined || !target_type) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "name, target_amount, and target_type required",
-                }),
-              },
-            ],
-          };
+          return errorResponse("name, target_amount, and target_type required");
         }
 
         if (target_type === "account" && !account_id) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "account_id required when target_type is 'account'",
-                }),
-              },
-            ],
-          };
+          return errorResponse("account_id required when target_type is 'account'");
         }
 
         const id = db.createMilestone({
@@ -371,75 +283,30 @@ export function registerWealthTools(server: McpServer, db: FinanceDB): void {
           account_id,
         });
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                { created: { id, name, target_amount, target_type } },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({ created: { id, name, target_amount, target_type } });
       }
 
       if (action === "list") {
         const milestones = db.listMilestones();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ milestones }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ milestones });
       }
 
       if (action === "delete") {
         if (!milestone_id) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "milestone_id required" }),
-              },
-            ],
-          };
+          return errorResponse("milestone_id required");
         }
         const deleted = db.deleteMilestone(milestone_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ deleted: deleted > 0 }),
-            },
-          ],
-        };
+        return jsonResponse({ deleted: deleted > 0 });
       }
 
       if (action === "check") {
         const progress = checkMilestones(db);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  milestones: progress.length > 0 ? progress : "No milestones set",
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({
+          milestones: progress.length > 0 ? progress : "No milestones set",
+        });
       }
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }],
-      };
+      return errorResponse("Unknown action");
     }
   );
 }

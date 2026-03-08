@@ -3,12 +3,7 @@ import { z } from "zod";
 import type { FinanceDB } from "../db/database.js";
 import { today } from "../utils/dates.js";
 import { roundMoney } from "../utils/money.js";
-
-function jsonResponse(data: unknown) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-  };
-}
+import { jsonResponse, errorResponse } from "../utils/response.js";
 
 export function registerSnapshotTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -44,6 +39,7 @@ export function registerSnapshotTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Position updates to apply"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ action, as_of, source_date, account_id, updates }) => {
       const targetDate = as_of || today();
 
@@ -73,11 +69,11 @@ export function registerSnapshotTools(server: McpServer, db: FinanceDB): void {
             .filter((a) => a.is_investment === 1 || a.is_investment === true);
 
       if (investmentAccounts.length === 0) {
-        return jsonResponse({
-          error: account_id
+        return errorResponse(
+          account_id
             ? `Account ${account_id} not found`
-            : "No investment accounts found",
-        });
+            : "No investment accounts found"
+        );
       }
 
       if (action === "carry_forward") {
@@ -176,9 +172,7 @@ export function registerSnapshotTools(server: McpServer, db: FinanceDB): void {
 
       if (action === "update_position") {
         if (!updates || updates.length === 0) {
-          return jsonResponse({
-            error: "updates array is required and must not be empty",
-          });
+          return errorResponse("updates array is required and must not be empty");
         }
 
         const updatesMap = new Map<
@@ -294,7 +288,7 @@ export function registerSnapshotTools(server: McpServer, db: FinanceDB): void {
         });
       }
 
-      return jsonResponse({ error: "Unknown action" });
+      return errorResponse("Unknown action");
     }
   );
 }

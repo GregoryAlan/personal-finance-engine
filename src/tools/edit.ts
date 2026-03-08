@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FinanceDB } from "../db/database.js";
 import { extractMerchant } from "../import/merchant.js";
+import { jsonResponse, errorResponse } from "../utils/response.js";
 
 export function registerEditTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -50,6 +51,7 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("For bulk_update: match transactions containing this text"),
     },
+    { destructiveHint: true, openWorldHint: false },
     async ({
       action,
       transaction_id,
@@ -63,7 +65,7 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
     }) => {
       if (action === "update") {
         if (!transaction_id) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id required" }) }] };
+          return errorResponse("transaction_id required");
         }
 
         const updates: Record<string, unknown> = {};
@@ -78,54 +80,36 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
         if (category_path) {
           const cat = db.getCategoryByPath(category_path);
           if (!cat) {
-            return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Category not found: ${category_path}` }) }] };
+            return errorResponse(`Category not found: ${category_path}`);
           }
           updates.category_id = cat.id;
         }
 
         if (Object.keys(updates).length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No fields to update" }) }] };
+          return errorResponse("No fields to update");
         }
 
         db.updateTransaction(transaction_id, updates);
         const updated = db.getTransaction(transaction_id);
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ updated }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ updated });
       }
 
       if (action === "split") {
         if (!transaction_id || !splits || splits.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id and splits required" }) }],
-          };
+          return errorResponse("transaction_id and splits required");
         }
 
         // Validate split amounts sum to parent
         const parent = db.getTransaction(transaction_id);
         if (!parent) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Transaction not found" }) }] };
+          return errorResponse("Transaction not found");
         }
 
         const splitSum = Math.round(splits.reduce((s, sp) => s + sp.amount, 0) * 100) / 100;
         const parentAmount = Math.round((parent.amount as number) * 100) / 100;
         if (splitSum !== parentAmount) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: `Split amounts (${splitSum}) must equal parent amount (${parentAmount})`,
-                }),
-              },
-            ],
-          };
+          return errorResponse(`Split amounts (${splitSum}) must equal parent amount (${parentAmount})`);
         }
 
         // Resolve categories and merchants for splits
@@ -145,78 +129,49 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
 
         const childIds = db.splitTransaction(transaction_id, resolvedSplits);
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  split: {
-                    parent_id: transaction_id,
-                    parent_excluded: true,
-                    children: childIds.map((id, i) => ({
-                      id,
-                      description: splits[i].description,
-                      amount: splits[i].amount,
-                      category: splits[i].category_path,
-                    })),
-                  },
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({
+          split: {
+            parent_id: transaction_id,
+            parent_excluded: true,
+            children: childIds.map((id, i) => ({
+              id,
+              description: splits[i].description,
+              amount: splits[i].amount,
+              category: splits[i].category_path,
+            })),
+          },
+        });
       }
 
       if (action === "unsplit") {
         if (!transaction_id) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id required" }) }] };
+          return errorResponse("transaction_id required");
         }
         db.unsplitTransaction(transaction_id);
         const restored = db.getTransaction(transaction_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ restored }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ restored });
       }
 
       if (action === "exclude") {
         if (!transaction_id) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id required" }) }] };
+          return errorResponse("transaction_id required");
         }
         db.updateTransaction(transaction_id, { is_excluded: 1 }, "exclude");
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ excluded: transaction_id }) }],
-        };
+        return jsonResponse({ excluded: transaction_id });
       }
 
       if (action === "restore") {
         if (!transaction_id) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id required" }) }] };
+          return errorResponse("transaction_id required");
         }
         db.updateTransaction(transaction_id, { is_excluded: 0 }, "restore");
         const restored = db.getTransaction(transaction_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ restored }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ restored });
       }
 
       if (action === "bulk_update") {
         if (!match_description) {
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ error: "match_description required" }) }],
-          };
+          return errorResponse("match_description required");
         }
 
         const updates: Record<string, unknown> = {};
@@ -227,7 +182,7 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
         if (category_path) {
           const cat = db.getCategoryByPath(category_path);
           if (!cat) {
-            return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Category not found: ${category_path}` }) }] };
+            return errorResponse(`Category not found: ${category_path}`);
           }
           updates.category_id = cat.id;
         }
@@ -235,37 +190,23 @@ export function registerEditTools(server: McpServer, db: FinanceDB): void {
         if (notes !== undefined) updates.notes = notes;
 
         if (Object.keys(updates).length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No fields to update" }) }] };
+          return errorResponse("No fields to update");
         }
 
         const result = db.bulkUpdateTransactions(match_description, updates);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(result);
       }
 
       if (action === "history") {
         if (!transaction_id) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ error: "transaction_id required" }) }] };
+          return errorResponse("transaction_id required");
         }
         const history = db.getTransactionEditHistory(transaction_id);
         const txn = db.getTransaction(transaction_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ transaction: txn, edits: history }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ transaction: txn, edits: history });
       }
 
-      return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }] };
+      return errorResponse("Unknown action");
     }
   );
 }

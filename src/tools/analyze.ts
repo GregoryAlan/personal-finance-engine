@@ -14,6 +14,8 @@ import { extractMerchant } from "../import/merchant.js";
 import { decomposeContributionsVsGrowth } from "../analysis/wealth.js";
 import { addMonths, today, monthsBetween } from "../utils/dates.js";
 import { roundMoney } from "../utils/money.js";
+import { jsonResponse, errorResponse, tableResponse } from "../utils/response.js";
+import { formatTable } from "../utils/table.js";
 
 export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -28,6 +30,7 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Add comparison to previous period or same period last year"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ type, date_from, date_to, compare }) => {
       const end = date_to || today();
       const start = date_from || addMonths(end, -3);
@@ -63,14 +66,7 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         result = generateCashFlow(db, start, end);
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      return jsonResponse(result);
     }
   );
 
@@ -85,20 +81,40 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Drill into a specific category (e.g., 'Food' to see subcategories)"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ date_from, date_to, category }) => {
       const end = date_to || today();
       const start = date_from || addMonths(end, -1);
 
-      const result = analyzeSpending(db, start, end, category);
+      const result = analyzeSpending(db, start, end, category) as unknown as Record<string, unknown>;
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      // Build table sections for by_category and top_merchants
+      const tables: string[] = [];
+
+      if (result.by_category && Array.isArray(result.by_category)) {
+        tables.push(
+          "## By Category\n" +
+            formatTable(result.by_category as Record<string, unknown>[], {
+              columns: ["category", "total", "count", "pct_of_spending"],
+            })
+        );
+      }
+
+      if (result.top_merchants && Array.isArray(result.top_merchants)) {
+        tables.push(
+          "## Top Merchants\n" +
+            formatTable(result.top_merchants as Record<string, unknown>[], {
+              columns: ["merchant", "total", "count", "category"],
+            })
+        );
+      }
+
+      if (tables.length > 0) {
+        const { by_category, top_merchants, ...summary } = result;
+        return tableResponse(summary, tables.join("\n\n"));
+      }
+
+      return jsonResponse(result);
     }
   );
 
@@ -111,6 +127,7 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
       decompose: z.boolean().optional().describe("Break each period's change into contributions vs investment growth"),
       trend: z.boolean().optional().describe("Include CAGR, average monthly growth, and milestone projections"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ months, include_accounts, decompose, trend }) => {
       const numMonths = months ?? 12;
       const result = calculateNetWorthHistory(db, numMonths, include_accounts ?? false);
@@ -118,7 +135,6 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
       const output: Record<string, unknown> = {
         months: numMonths,
         data_points: result.length,
-        history: result,
         summary:
           result.length >= 2
             ? {
@@ -169,14 +185,19 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         };
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(output, null, 2),
-          },
-        ],
-      };
+      // Render history as table
+      const historyRows = result as unknown as Record<string, unknown>[];
+      if (historyRows.length > 0) {
+        const columns = ["date", "net_worth", "assets", "liabilities"];
+        // Only include account columns if present
+        if (include_accounts && historyRows[0].accounts) {
+          // Keep accounts in JSON summary, table shows core columns
+        }
+        return tableResponse(output, formatTable(historyRows, { columns }));
+      }
+
+      output.history = result;
+      return jsonResponse(output);
     }
   );
 
@@ -189,17 +210,23 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("How many months of history to scan (default 6)"),
     },
+    { idempotentHint: true, openWorldHint: false },
     async ({ lookback_months }) => {
-      const result = detectRecurring(db, lookback_months ?? 6);
+      const result = detectRecurring(db, lookback_months ?? 6) as unknown as Record<string, unknown>;
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      // Render recurring items as table
+      if (result.recurring && Array.isArray(result.recurring)) {
+        const { recurring, ...summary } = result;
+        const recurringRows = recurring as Record<string, unknown>[];
+        return tableResponse(
+          summary,
+          formatTable(recurringRows, {
+            columns: ["description", "frequency", "typical_amount", "monthly_cost", "is_income", "occurrences"],
+          })
+        );
+      }
+
+      return jsonResponse(result);
     }
   );
 
@@ -265,6 +292,7 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("For unlink_transfer: transaction ID to unlink"),
     },
+    { openWorldHint: false },
     async ({
       action,
       group_by_description,
@@ -282,251 +310,123 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
     }) => {
       if (action === "list_uncategorized") {
         const result = db.listUncategorized(group_by_description);
-        return {
-          content: [
+
+        if (group_by_description) {
+          const rows = result as Record<string, unknown>[];
+          return tableResponse(
             {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  uncategorized_count: result.length,
-                  items: result,
-                  hint: group_by_description
-                    ? "These are grouped by description. Create rules for frequent merchants to auto-categorize future imports."
-                    : "Add group_by_description=true to see patterns.",
-                },
-                null,
-                2
-              ),
+              uncategorized_count: result.length,
+              hint: "These are grouped by description. Create rules for frequent merchants to auto-categorize future imports.",
             },
-          ],
-        };
+            formatTable(rows, {
+              columns: ["merchant", "description", "count", "total"],
+            })
+          );
+        }
+
+        return jsonResponse({
+          uncategorized_count: result.length,
+          items: result,
+          hint: "Add group_by_description=true to see patterns.",
+        });
       }
 
       if (action === "create_rule") {
         if (!pattern || !category_path) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "pattern and category_path required" }),
-              },
-            ],
-          };
+          return errorResponse("pattern and category_path required");
         }
 
         const cat = db.getCategoryByPath(category_path);
         if (!cat) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: `Category not found: ${category_path}`,
-                  available: db.listCategories().map((c) => (c as { full_path: string }).full_path),
-                }),
-              },
-            ],
-          };
+          return errorResponse(`Category not found: ${category_path}`, {
+            available: db.listCategories().map((c) => (c as { full_path: string }).full_path),
+          });
         }
 
         const ruleId = db.createRule(pattern, cat.id, priority, match_type);
-
-        // Auto-apply the new rule
         const applied = db.applyCategorization();
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  created: { id: ruleId, pattern, category: category_path, match_type: match_type ?? "contains" },
-                  auto_applied: applied,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResponse({
+          created: { id: ruleId, pattern, category: category_path, match_type: match_type ?? "contains" },
+          auto_applied: applied,
+        });
       }
 
       if (action === "auto_categorize") {
         const result = db.applyCategorization();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(result);
       }
 
       if (action === "assign") {
         if (!transaction_ids || !category_path) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "transaction_ids and category_path required" }),
-              },
-            ],
-          };
+          return errorResponse("transaction_ids and category_path required");
         }
 
         const cat = db.getCategoryByPath(category_path);
         if (!cat) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: `Category not found: ${category_path}` }),
-              },
-            ],
-          };
+          return errorResponse(`Category not found: ${category_path}`);
         }
 
         const updated = db.assignCategory(transaction_ids, cat.id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ updated, category: category_path }),
-            },
-          ],
-        };
+        return jsonResponse({ updated, category: category_path });
       }
 
       if (action === "list_rules") {
         const rules = db.listRules();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ rules }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ rules });
       }
 
       if (action === "list_categories") {
         const categories = db.listCategories(category_type);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ categories }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ categories });
       }
 
       if (action === "renormalize") {
         const updated = db.renormalizeMerchants(extractMerchant);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ renormalized: updated }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ renormalized: updated });
       }
 
       if (action === "detect_transfers") {
         const result = detectTransfers(db, { dateWindowDays: date_window_days, dryRun: dry_run });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+        return jsonResponse(result);
       }
 
       if (action === "link_transfer") {
         if (!transaction_id_a || !transaction_id_b) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "transaction_id_a and transaction_id_b required" }),
-              },
-            ],
-          };
+          return errorResponse("transaction_id_a and transaction_id_b required");
         }
 
         const txnA = db.getTransaction(transaction_id_a);
         const txnB = db.getTransaction(transaction_id_b);
         if (!txnA || !txnB) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "One or both transactions not found" }),
-              },
-            ],
-          };
+          return errorResponse("One or both transactions not found");
         }
 
-        // Determine transfer category
         const categoryId = getTransferCategoryId(db, txnA, txnB);
         db.linkTransferPair(transaction_id_a, transaction_id_b, categoryId);
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                linked: {
-                  a: { id: transaction_id_a, description: txnA.description, amount: txnA.amount, account: txnA.account_name },
-                  b: { id: transaction_id_b, description: txnB.description, amount: txnB.amount, account: txnB.account_name },
-                },
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({
+          linked: {
+            a: { id: transaction_id_a, description: txnA.description, amount: txnA.amount, account: txnA.account_name },
+            b: { id: transaction_id_b, description: txnB.description, amount: txnB.amount, account: txnB.account_name },
+          },
+        });
       }
 
       if (action === "unlink_transfer") {
         if (!transaction_id) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: "transaction_id required" }),
-              },
-            ],
-          };
+          return errorResponse("transaction_id required");
         }
         db.unlinkTransferPair(transaction_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ unlinked: transaction_id }),
-            },
-          ],
-        };
+        return jsonResponse({ unlinked: transaction_id });
       }
 
       if (action === "list_transfers") {
         const transfers = db.getLinkedTransfers();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ count: transfers.length, transfers }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({ count: transfers.length, transfers });
       }
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown action" }) }],
-      };
+      return errorResponse("Unknown action");
     }
   );
 }
@@ -536,7 +436,6 @@ function getTransferCategoryId(
   txnA: Record<string, unknown>,
   txnB: Record<string, unknown>
 ): number | undefined {
-  // Determine the right transfer subcategory
   const accountA = db.getAccount(txnA.account_id as number);
   const accountB = db.getAccount(txnB.account_id as number);
   if (!accountA || !accountB) return undefined;

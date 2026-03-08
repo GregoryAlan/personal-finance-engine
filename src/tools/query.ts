@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FinanceDB } from "../db/database.js";
+import { jsonResponse, tableResponse } from "../utils/response.js";
+import { formatTable } from "../utils/table.js";
 
 export function registerQueryTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -26,6 +28,7 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
       include_excluded: z.boolean().optional().describe("Include excluded/split-parent transactions"),
       exclude_transfers: z.boolean().optional().describe("Exclude transfer transactions from results"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async (filters) => {
       const result = db.queryTransactions({
         account_id: filters.account_id,
@@ -45,26 +48,41 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
         exclude_transfers: filters.exclude_transfers,
       });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                ...result,
-                query: {
-                  ...filters,
-                  note: filters.group_by
-                    ? `Grouped by ${filters.group_by}. Each row shows total, count, avg, min, max.`
-                    : undefined,
-                },
-              },
-              null,
-              2
-            ),
-          },
-        ],
+      const summary: Record<string, unknown> = {
+        ...result,
+        query: {
+          ...filters,
+          note: filters.group_by
+            ? `Grouped by ${filters.group_by}. Each row shows total, count, avg, min, max.`
+            : undefined,
+        },
       };
+
+      // Render tabular output for row data
+      if (filters.group_by && result.groups) {
+        // Remove groups from summary since they'll be in the table
+        const { groups, ...rest } = summary;
+        const groupRows = result.groups as Record<string, unknown>[];
+        return tableResponse(
+          rest,
+          formatTable(groupRows, {
+            columns: ["group_key", "total", "count", "avg_amount", "min_amount", "max_amount"],
+          })
+        );
+      }
+
+      if (!filters.group_by && result.transactions) {
+        const { transactions, ...rest } = summary;
+        const txnRows = result.transactions as Record<string, unknown>[];
+        return tableResponse(
+          rest,
+          formatTable(txnRows, {
+            columns: ["date", "account_name", "merchant", "amount", "category_path", "description"],
+          })
+        );
+      }
+
+      return jsonResponse(summary);
     }
   );
 
@@ -74,6 +92,7 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
     {
       as_of: z.string().optional().describe("Balance as of this date (YYYY-MM-DD). Defaults to latest."),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async ({ as_of }) => {
       const balances = db.getBalances(as_of);
 
@@ -89,26 +108,15 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
         }
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                as_of: as_of || "latest",
-                accounts: balances,
-                summary: {
-                  total_assets: Math.round(totalAssets * 100) / 100,
-                  total_liabilities: Math.round(totalLiabilities * 100) / 100,
-                  net_worth: Math.round((totalAssets - totalLiabilities) * 100) / 100,
-                },
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        as_of: as_of || "latest",
+        accounts: balances,
+        summary: {
+          total_assets: Math.round(totalAssets * 100) / 100,
+          total_liabilities: Math.round(totalLiabilities * 100) / 100,
+          net_worth: Math.round((totalAssets - totalLiabilities) * 100) / 100,
+        },
+      });
     }
   );
 
@@ -124,24 +132,28 @@ export function registerQueryTools(server: McpServer, db: FinanceDB): void {
         .optional()
         .describe("Group holdings and show allocation percentages"),
     },
+    { readOnlyHint: true, openWorldHint: false },
     async (filters) => {
       const result = db.getHoldings(filters);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                ...result,
-                query: filters,
-              },
-              null,
-              2
-            ),
-          },
-        ],
+      const summary: Record<string, unknown> = {
+        ...result,
+        query: filters,
       };
+
+      // Render tabular output for ungrouped holdings
+      if (!filters.group_by && result.holdings) {
+        const { holdings, ...rest } = summary;
+        const holdingRows = result.holdings as Record<string, unknown>[];
+        return tableResponse(
+          rest,
+          formatTable(holdingRows, {
+            columns: ["symbol", "name", "shares", "cost_basis", "current_value", "asset_class", "account_name"],
+          })
+        );
+      }
+
+      return jsonResponse(summary);
     }
   );
 }
