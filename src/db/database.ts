@@ -1068,6 +1068,22 @@ export class FinanceDB {
     ).map((r) => r.as_of);
   }
 
+  getHoldingsSnapshotSummaries(accountId?: number): Record<string, unknown>[] {
+    const where = accountId ? "WHERE account_id = ?" : "";
+    const params = accountId ? [accountId] : [];
+    return this.db
+      .prepare(
+        `SELECT as_of,
+          COUNT(DISTINCT account_id) as account_count,
+          COUNT(*) as position_count,
+          SUM(current_value) as total_value
+        FROM holdings ${where}
+        GROUP BY as_of
+        ORDER BY as_of DESC`
+      )
+      .all(...params) as Record<string, unknown>[];
+  }
+
   getHoldingsAtDate(asOf: string, accountId?: number): Record<string, unknown>[] {
     const accountFilter = accountId ? "AND h.account_id = ?" : "";
     const params: unknown[] = [asOf];

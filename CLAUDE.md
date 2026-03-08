@@ -57,11 +57,17 @@ milestones action=create name="$1M Net Worth" target_amount=1000000 target_type=
 milestones action=check
 ```
 
-### 6. Track growth over time
+### 6. Snapshot & track holdings over time
 ```
+snapshot_holdings action=carry_forward
+snapshot_holdings action=carry_forward as_of="2026-04-01" updates=[{symbol:"VTI",current_value:90000}]
+snapshot_holdings action=update_position updates=[{symbol:"AAPL",current_value:200000}]
+snapshot_holdings action=list_snapshots
 net_worth_history months=24 decompose=true trend=true
 get_holdings group_by="asset_class"
 ```
+
+Carry forward copies latest positions to a new date without a full CSV re-import. Use `update_position` to true-up individual values. `list_snapshots` shows all snapshot dates with summary stats.
 
 ### 7. Project & scenario
 ```
@@ -71,7 +77,17 @@ scenario name="Max out 401k" adjustments=[{type:"increase_contribution", descrip
 scenario name="Bear market" adjustments=[{type:"change_return_assumption", description:"Bear market returns", amount:-5}] investment_return=7
 ```
 
-### 8. Transaction analysis (secondary)
+### 8. Portfolio risk analysis
+```
+portfolio_risk analysis=risk_metrics
+portfolio_risk analysis=risk_metrics period=2y risk_free_rate=5.0
+portfolio_risk analysis=concentration top_n=5
+portfolio_risk analysis=monte_carlo simulations=5000 months=240 monthly_contribution=2000
+portfolio_risk analysis=independence withdrawal_rate=3.5 investment_return=7
+portfolio_risk analysis=independence annual_spending=60000
+```
+
+### 9. Transaction analysis (secondary)
 ```
 query_transactions date_from="2025-01-01" group_by="category"
 query_transactions group_by="merchant" exclude_transfers=true
@@ -80,7 +96,7 @@ spending_analysis category="Food"
 detect_recurring
 ```
 
-## Tools Reference (18 total)
+## Tools Reference (20 total)
 
 ### Wealth & Allocation
 | Tool | Purpose |
@@ -88,6 +104,7 @@ detect_recurring
 | `wealth_summary` | Primary dashboard: net worth, performance, allocation, drift, contributions vs growth, milestones |
 | `allocation` | View current allocation, set targets, check drift, get rebalance suggestions |
 | `milestones` | Create/track wealth goals (net worth, account, investment targets) |
+| `portfolio_risk` | Risk analysis: Sharpe/Sortino ratios, volatility, max drawdown, HHI concentration, Monte Carlo simulation, FI planning |
 
 ### Data Management
 | Tool | Purpose |
@@ -95,6 +112,7 @@ detect_recurring
 | `import_csv` | Import bank/credit card CSV with auto-detection |
 | `manage_accounts` | Create/list/update accounts |
 | `import_holdings` | Import investment positions |
+| `snapshot_holdings` | Carry forward holdings snapshots, update positions, list snapshot history |
 | `categorize` | Manage rules, assign categories, detect transfers, renormalize merchants |
 | `edit_transaction` | Update, split, exclude, bulk-update, view history |
 | `query_sql` | Raw SQL access — reads return rows, writes return changes count |
