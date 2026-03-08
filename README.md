@@ -4,7 +4,7 @@ MCP server for wealth tracking, investment analysis, and personal finance.
 
 ## What It Does
 
-Import bank and brokerage CSVs, track net worth and allocation over time, analyze spending, and run projections — all through 20 MCP tools. Self-contained: no external APIs, everything runs from imported data with a local SQLite database.
+Import bank and brokerage CSVs, track net worth and allocation over time, analyze spending, and run projections — all through 20 MCP tools and 4 guided prompts. Self-contained: no external APIs, everything runs from imported data with a local SQLite database.
 
 ## Install
 
@@ -77,6 +77,17 @@ For other formats, read the CSV headers and provide a `column_mapping`.
 | `detect_recurring` | Find subscriptions and regular payments |
 | `forecast` | Project cash flow or net worth forward with investment return modeling |
 | `scenario` | What-if modeling: adjust spending, contributions, return assumptions |
+
+## Prompts (4)
+
+Guided workflows for common tasks — no need to know the tool API:
+
+| Prompt | Purpose |
+|--------|---------|
+| `setup-finances` | Step-by-step onboarding: create accounts, import CSVs, categorize, detect transfers, verify |
+| `monthly-review` | Monthly financial review: income statement, spending, top merchants, net worth, milestones, recurring charges |
+| `investment-checkup` | Portfolio health check: allocation, drift, risk metrics, concentration, rebalance suggestions |
+| `financial-independence` | FI planning: calculate FI number, Monte Carlo simulation, net worth forecast, scenario modeling |
 
 ## Design
 
