@@ -14,6 +14,7 @@ import { registerSqlTools } from "./tools/sql.js";
 import { registerWealthTools } from "./tools/wealth.js";
 import { registerRiskTools } from "./tools/risk.js";
 import { registerSnapshotTools } from "./tools/snapshot.js";
+import { registerPrompts } from "./prompts.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = join(__dirname, "..", "data", "finance.db");
@@ -34,6 +35,7 @@ registerSqlTools(server, db);
 registerWealthTools(server, db);
 registerRiskTools(server, db);
 registerSnapshotTools(server, db);
+registerPrompts(server);
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
