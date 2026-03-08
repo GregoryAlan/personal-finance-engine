@@ -22,8 +22,16 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         )
         .optional()
         .describe("Adjustments to apply on top of baseline recurring patterns"),
+      investment_return: z
+        .number()
+        .optional()
+        .describe("Expected annual investment return % (e.g., 7 for 7%). Applies monthly compounding to investment balance."),
+      monthly_contribution: z
+        .number()
+        .optional()
+        .describe("Monthly investment contribution amount added to investment balance each month"),
     },
-    async ({ type, months: forecastMonths, adjustments }) => {
+    async ({ type, months: forecastMonths, adjustments, investment_return, monthly_contribution }) => {
       const numMonths = forecastMonths ?? 12;
       const recurring = db.getRecurringPatterns();
 
@@ -61,14 +69,24 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         }
       }
 
-      // Get current net worth for net_worth forecast
+      // Get current balances for net_worth forecast
       const balances = db.getBalances();
       let currentNetWorth = 0;
+      let currentInvestmentBalance = 0;
+      let currentCashBalance = 0;
       for (const b of balances) {
         const bal = (b.balance as number) || 0;
-        if (b.is_asset) currentNetWorth += bal;
-        else currentNetWorth -= Math.abs(bal);
+        if (b.is_asset) {
+          currentNetWorth += bal;
+          if (b.is_investment) currentInvestmentBalance += bal;
+          else currentCashBalance += bal;
+        } else {
+          currentNetWorth -= Math.abs(bal);
+        }
       }
+
+      const monthlyReturn = investment_return ? investment_return / 12 / 100 : 0;
+      const monthlyContrib = monthly_contribution ?? 0;
 
       const projection: {
         month: string;
@@ -77,10 +95,14 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         net: number;
         cumulative_net: number;
         net_worth?: number;
+        investment_balance?: number;
+        investment_growth?: number;
         adjustments_applied?: string[];
       }[] = [];
 
       let cumulativeNet = 0;
+      let investmentBalance = currentInvestmentBalance;
+      let totalInvestmentGrowth = 0;
 
       for (let i = 0; i < numMonths; i++) {
         const monthDate = addMonths(today(), i + 1);
@@ -106,6 +128,13 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         const net = income - expenses;
         cumulativeNet += net;
 
+        // Apply investment compounding and contributions
+        if (monthlyReturn > 0 || monthlyContrib > 0) {
+          const monthGrowth = investmentBalance * monthlyReturn;
+          totalInvestmentGrowth += monthGrowth;
+          investmentBalance += monthGrowth + monthlyContrib;
+        }
+
         const entry: typeof projection[0] = {
           month: monthDate.slice(0, 7),
           income: roundMoney(income),
@@ -115,7 +144,11 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         };
 
         if (type === "net_worth") {
-          entry.net_worth = roundMoney(currentNetWorth + cumulativeNet);
+          const projectedCash = currentCashBalance + cumulativeNet - (monthlyContrib * (i + 1));
+          const projectedDebt = currentNetWorth - currentInvestmentBalance - currentCashBalance;
+          entry.net_worth = roundMoney(investmentBalance + projectedCash - Math.abs(projectedDebt));
+          entry.investment_balance = roundMoney(investmentBalance);
+          entry.investment_growth = roundMoney(totalInvestmentGrowth);
         }
 
         if (appliedAdjustments.length > 0) {
@@ -124,6 +157,10 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
 
         projection.push(entry);
       }
+
+      const endNetWorth = type === "net_worth" && projection.length > 0
+        ? projection[projection.length - 1].net_worth
+        : undefined;
 
       return {
         content: [
@@ -140,11 +177,23 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
                   source: recurring.length > 0 ? "recurring_patterns" : "recent_averages",
                 },
                 current_net_worth: type === "net_worth" ? roundMoney(currentNetWorth) : undefined,
+                investment_assumptions: (investment_return || monthlyContrib)
+                  ? {
+                      annual_return_pct: investment_return ?? 0,
+                      monthly_contribution: monthlyContrib,
+                      starting_investment_balance: roundMoney(currentInvestmentBalance),
+                    }
+                  : undefined,
                 projection,
                 end_state: {
                   total_saved: roundMoney(cumulativeNet),
-                  projected_net_worth:
-                    type === "net_worth" ? roundMoney(currentNetWorth + cumulativeNet) : undefined,
+                  projected_net_worth: endNetWorth,
+                  total_investment_growth: (investment_return || monthlyContrib)
+                    ? roundMoney(totalInvestmentGrowth)
+                    : undefined,
+                  projected_investment_balance: (investment_return || monthlyContrib)
+                    ? roundMoney(investmentBalance)
+                    : undefined,
                 },
               },
               null,
@@ -166,7 +215,15 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         .array(
           z.object({
             type: z
-              .enum(["adjust_spending", "adjust_income", "one_time", "start_recurring", "stop_recurring"])
+              .enum([
+                "adjust_spending",
+                "adjust_income",
+                "one_time",
+                "start_recurring",
+                "stop_recurring",
+                "increase_contribution",
+                "change_return_assumption",
+              ])
               .describe("Type of adjustment"),
             description: z.string().describe("What this adjustment represents"),
             category: z.string().optional().describe("Category to adjust (for adjust_spending)"),
@@ -176,8 +233,12 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         )
         .describe("List of scenario adjustments"),
       savings_target: z.number().optional().describe("Target savings amount to evaluate against"),
+      investment_return: z
+        .number()
+        .optional()
+        .describe("Baseline annual investment return % (e.g., 7). Applied to both baseline and scenario unless overridden."),
     },
-    async ({ name, months: scenarioMonths, adjustments, savings_target }) => {
+    async ({ name, months: scenarioMonths, adjustments, savings_target, investment_return }) => {
       const numMonths = scenarioMonths ?? 12;
 
       // Get baseline recurring
@@ -213,8 +274,33 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         }
       }
 
-      const baseline: { month: string; net: number; cumulative: number }[] = [];
-      const scenario: { month: string; net: number; cumulative: number; events: string[] }[] = [];
+      // Get investment balance for compounding
+      const balances = db.getBalances();
+      let investmentBalance = 0;
+      for (const b of balances) {
+        if (b.is_asset && b.is_investment) {
+          investmentBalance += (b.balance as number) || 0;
+        }
+      }
+
+      const baseReturnRate = investment_return ? investment_return / 12 / 100 : 0;
+      let baselineInvestBal = investmentBalance;
+      let scenarioInvestBal = investmentBalance;
+      let scenarioReturnRate = baseReturnRate;
+      let scenarioExtraContrib = 0;
+
+      // Pre-scan adjustments for investment-specific types
+      for (const adj of adjustments) {
+        if (adj.type === "change_return_assumption") {
+          scenarioReturnRate = adj.amount / 12 / 100;
+        }
+        if (adj.type === "increase_contribution") {
+          scenarioExtraContrib += adj.amount;
+        }
+      }
+
+      const baseline: { month: string; net: number; cumulative: number; investment_balance?: number }[] = [];
+      const scenario: { month: string; net: number; cumulative: number; investment_balance?: number; events: string[] }[] = [];
 
       let baselineCum = 0;
       let scenarioCum = 0;
@@ -225,7 +311,15 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         // Baseline
         const baseNet = baseIncome - baseExpenses;
         baselineCum += baseNet;
-        baseline.push({ month: monthStr, net: roundMoney(baseNet), cumulative: roundMoney(baselineCum) });
+        if (baseReturnRate > 0) {
+          baselineInvestBal += baselineInvestBal * baseReturnRate;
+        }
+        baseline.push({
+          month: monthStr,
+          net: roundMoney(baseNet),
+          cumulative: roundMoney(baselineCum),
+          investment_balance: investment_return ? roundMoney(baselineInvestBal) : undefined,
+        });
 
         // Scenario
         let scenarioIncome = baseIncome;
@@ -235,7 +329,7 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
         for (const adj of adjustments) {
           switch (adj.type) {
             case "adjust_spending":
-              scenarioExpenses += adj.amount; // negative amount reduces spending
+              scenarioExpenses += adj.amount;
               events.push(adj.description);
               break;
             case "adjust_income":
@@ -255,11 +349,21 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
               if (i === 0) events.push(adj.description);
               break;
             case "stop_recurring":
-              scenarioExpenses -= Math.abs(adj.amount); // Remove this expense
+              scenarioExpenses -= Math.abs(adj.amount);
+              if (i === 0) events.push(adj.description);
+              break;
+            case "increase_contribution":
+              // Handled via scenarioExtraContrib
+              if (i === 0) events.push(adj.description);
+              break;
+            case "change_return_assumption":
               if (i === 0) events.push(adj.description);
               break;
           }
         }
+
+        // Apply scenario investment compounding
+        scenarioInvestBal += scenarioInvestBal * scenarioReturnRate + scenarioExtraContrib;
 
         const scenarioNet = scenarioIncome - scenarioExpenses;
         scenarioCum += scenarioNet;
@@ -267,6 +371,7 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
           month: monthStr,
           net: roundMoney(scenarioNet),
           cumulative: roundMoney(scenarioCum),
+          investment_balance: (investment_return || scenarioExtraContrib) ? roundMoney(scenarioInvestBal) : undefined,
           events: events.length > 0 ? events : [],
         });
       }
@@ -279,6 +384,14 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
           expenses: roundMoney(baseExpenses),
           net: roundMoney(baseIncome - baseExpenses),
         },
+        investment_assumptions: (investment_return || scenarioExtraContrib)
+          ? {
+              baseline_annual_return: investment_return ?? 0,
+              scenario_annual_return: scenarioReturnRate * 12 * 100,
+              scenario_extra_monthly_contribution: scenarioExtraContrib,
+              starting_investment_balance: roundMoney(investmentBalance),
+            }
+          : undefined,
         baseline,
         scenario,
         comparison: {
@@ -286,6 +399,11 @@ export function registerProjectTools(server: McpServer, db: FinanceDB): void {
           scenario_total_saved: roundMoney(scenarioCum),
           difference: roundMoney(scenarioCum - baselineCum),
           monthly_improvement: roundMoney((scenarioCum - baselineCum) / numMonths),
+          baseline_investment_balance: investment_return ? roundMoney(baselineInvestBal) : undefined,
+          scenario_investment_balance: (investment_return || scenarioExtraContrib) ? roundMoney(scenarioInvestBal) : undefined,
+          investment_difference: (investment_return || scenarioExtraContrib)
+            ? roundMoney(scenarioInvestBal - baselineInvestBal)
+            : undefined,
         },
       };
 

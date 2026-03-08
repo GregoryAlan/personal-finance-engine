@@ -1033,6 +1033,133 @@ export class FinanceDB {
       .all(transactionId) as Record<string, unknown>[];
   }
 
+  // --- Holdings History ---
+
+  getHoldingsHistory(symbol?: string, accountId?: number): Record<string, unknown>[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (symbol) {
+      conditions.push("h.symbol = ?");
+      params.push(symbol);
+    }
+    if (accountId) {
+      conditions.push("h.account_id = ?");
+      params.push(accountId);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    return this.db
+      .prepare(
+        `SELECT h.*, a.name as account_name
+        FROM holdings h
+        JOIN accounts a ON h.account_id = a.id
+        ${where}
+        ORDER BY h.as_of ASC, h.symbol`
+      )
+      .all(...params) as Record<string, unknown>[];
+  }
+
+  getHoldingsSnapshotDates(accountId?: number): string[] {
+    const where = accountId ? "WHERE account_id = ?" : "";
+    const params = accountId ? [accountId] : [];
+    return (
+      this.db
+        .prepare(`SELECT DISTINCT as_of FROM holdings ${where} ORDER BY as_of`)
+        .all(...params) as { as_of: string }[]
+    ).map((r) => r.as_of);
+  }
+
+  getHoldingsAtDate(asOf: string, accountId?: number): Record<string, unknown>[] {
+    const accountFilter = accountId ? "AND h.account_id = ?" : "";
+    const params: unknown[] = [asOf];
+    if (accountId) params.push(accountId);
+    return this.db
+      .prepare(
+        `SELECT h.*, a.name as account_name
+        FROM holdings h
+        JOIN accounts a ON h.account_id = a.id
+        WHERE h.as_of = (
+          SELECT MAX(h2.as_of) FROM holdings h2
+          WHERE h2.account_id = h.account_id AND h2.symbol = h.symbol AND h2.as_of <= ?
+        ) ${accountFilter}
+        ORDER BY h.current_value DESC`
+      )
+      .all(...params) as Record<string, unknown>[];
+  }
+
+  // --- Allocation Targets ---
+
+  setAllocationTargets(name: string, targets: { asset_class: string; target_pct: number }[]): void {
+    const doSet = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM allocation_targets WHERE name = ?").run(name);
+      const insert = this.db.prepare(
+        "INSERT INTO allocation_targets (name, asset_class, target_pct) VALUES (?, ?, ?)"
+      );
+      for (const t of targets) {
+        insert.run(name, t.asset_class, t.target_pct);
+      }
+    });
+    doSet();
+  }
+
+  getAllocationTargets(name?: string): Record<string, unknown>[] {
+    if (name) {
+      return this.db
+        .prepare("SELECT * FROM allocation_targets WHERE name = ? ORDER BY target_pct DESC")
+        .all(name) as Record<string, unknown>[];
+    }
+    return this.db
+      .prepare("SELECT * FROM allocation_targets ORDER BY name, target_pct DESC")
+      .all() as Record<string, unknown>[];
+  }
+
+  deleteAllocationTargets(name: string): number {
+    return this.db.prepare("DELETE FROM allocation_targets WHERE name = ?").run(name).changes;
+  }
+
+  // --- Wealth Milestones ---
+
+  createMilestone(milestone: {
+    name: string;
+    target_amount: number;
+    target_type: string;
+    account_id?: number;
+  }): number {
+    const result = this.db
+      .prepare(
+        "INSERT INTO wealth_milestones (name, target_amount, target_type, account_id) VALUES (?, ?, ?, ?)"
+      )
+      .run(milestone.name, milestone.target_amount, milestone.target_type, milestone.account_id ?? null);
+    return Number(result.lastInsertRowid);
+  }
+
+  listMilestones(): Record<string, unknown>[] {
+    return this.db
+      .prepare(
+        `SELECT m.*, a.name as account_name
+        FROM wealth_milestones m
+        LEFT JOIN accounts a ON m.account_id = a.id
+        ORDER BY m.achieved_at IS NOT NULL, m.target_amount`
+      )
+      .all() as Record<string, unknown>[];
+  }
+
+  updateMilestone(id: number, updates: Record<string, unknown>): void {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    for (const [key, value] of Object.entries(updates)) {
+      if (key === "id") continue;
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+    if (fields.length === 0) return;
+    values.push(id);
+    this.db.prepare(`UPDATE wealth_milestones SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  deleteMilestone(id: number): number {
+    return this.db.prepare("DELETE FROM wealth_milestones WHERE id = ?").run(id).changes;
+  }
+
   // --- Transfer Detection ---
 
   linkTransferPair(idA: number, idB: number, categoryId?: number): void {

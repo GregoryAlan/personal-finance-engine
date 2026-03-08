@@ -210,6 +210,29 @@ function runMigrations(db: Database.Database): void {
 
   // Phase 3: Transfer detection
   db.exec("CREATE INDEX IF NOT EXISTS idx_transactions_transfer_pair ON transactions(transfer_pair_id)");
+
+  // Phase 4: Wealth accumulation tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS allocation_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL DEFAULT 'default',
+      asset_class TEXT NOT NULL,
+      target_pct REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(name, asset_class)
+    );
+
+    CREATE TABLE IF NOT EXISTS wealth_milestones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      target_amount REAL NOT NULL,
+      target_type TEXT NOT NULL CHECK(target_type IN ('net_worth','account','investment_total')),
+      account_id INTEGER REFERENCES accounts(id),
+      achieved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 }
 
 function seedDefaultRules(db: Database.Database): void {

@@ -11,7 +11,9 @@ import { calculateNetWorthHistory } from "../analysis/networth.js";
 import { detectRecurring } from "../analysis/recurring.js";
 import { detectTransfers } from "../analysis/transfers.js";
 import { extractMerchant } from "../import/merchant.js";
-import { addMonths, today } from "../utils/dates.js";
+import { decomposeContributionsVsGrowth } from "../analysis/wealth.js";
+import { addMonths, today, monthsBetween } from "../utils/dates.js";
+import { roundMoney } from "../utils/money.js";
 
 export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
   server.tool(
@@ -102,35 +104,76 @@ export function registerAnalyzeTools(server: McpServer, db: FinanceDB): void {
 
   server.tool(
     "net_worth_history",
-    "Track net worth over time with optional per-account breakdown.",
+    "Track net worth over time with optional per-account breakdown, contribution vs growth decomposition, and trend analysis.",
     {
       months: z.number().optional().describe("How many months of history (default 12)"),
       include_accounts: z.boolean().optional().describe("Include per-account breakdown at each point"),
+      decompose: z.boolean().optional().describe("Break each period's change into contributions vs investment growth"),
+      trend: z.boolean().optional().describe("Include CAGR, average monthly growth, and milestone projections"),
     },
-    async ({ months, include_accounts }) => {
-      const result = calculateNetWorthHistory(db, months ?? 12, include_accounts ?? false);
+    async ({ months, include_accounts, decompose, trend }) => {
+      const numMonths = months ?? 12;
+      const result = calculateNetWorthHistory(db, numMonths, include_accounts ?? false);
+
+      const output: Record<string, unknown> = {
+        months: numMonths,
+        data_points: result.length,
+        history: result,
+        summary:
+          result.length >= 2
+            ? {
+                start: result[0],
+                end: result[result.length - 1],
+                change: roundMoney(result[result.length - 1].net_worth - result[0].net_worth),
+              }
+            : null,
+      };
+
+      if (decompose && result.length >= 2) {
+        const dateFrom = result[0].date;
+        const dateTo = result[result.length - 1].date;
+        output.decomposition = decomposeContributionsVsGrowth(db, dateFrom, dateTo);
+      }
+
+      if (trend && result.length >= 2) {
+        const startNw = result[0].net_worth;
+        const endNw = result[result.length - 1].net_worth;
+        const totalChange = endNw - startNw;
+        const periodMonths = monthsBetween(result[0].date, result[result.length - 1].date) || 1;
+        const avgMonthlyGrowth = totalChange / periodMonths;
+
+        let cagr: number | null = null;
+        if (startNw > 0 && periodMonths >= 12) {
+          const years = periodMonths / 12;
+          cagr = roundMoney((Math.pow(endNw / startNw, 1 / years) - 1) * 100);
+        }
+
+        const projections: Record<string, unknown> = {};
+        if (avgMonthlyGrowth > 0) {
+          for (const target of [100000, 250000, 500000, 1000000, 2000000]) {
+            if (target > endNw) {
+              const monthsNeeded = Math.ceil((target - endNw) / avgMonthlyGrowth);
+              projections[`$${(target / 1000).toFixed(0)}k`] = {
+                months_away: monthsNeeded,
+                projected_date: addMonths(today(), monthsNeeded),
+              };
+            }
+          }
+        }
+
+        output.trend = {
+          cagr_pct: cagr,
+          avg_monthly_growth: roundMoney(avgMonthlyGrowth),
+          avg_monthly_growth_pct: startNw > 0 ? roundMoney((avgMonthlyGrowth / startNw) * 100) : null,
+          milestone_projections: Object.keys(projections).length > 0 ? projections : "All standard milestones achieved",
+        };
+      }
 
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(
-              {
-                months: months ?? 12,
-                data_points: result.length,
-                history: result,
-                summary:
-                  result.length >= 2
-                    ? {
-                        start: result[0],
-                        end: result[result.length - 1],
-                        change: Math.round((result[result.length - 1].net_worth - result[0].net_worth) * 100) / 100,
-                      }
-                    : null,
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify(output, null, 2),
           },
         ],
       };

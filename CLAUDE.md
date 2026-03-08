@@ -1,6 +1,6 @@
 # Personal Finance Engine
 
-MCP server for personal finance analysis. Import bank/brokerage CSVs, query transactions, analyze spending, and run projections.
+MCP server for wealth tracking, investment analysis, and personal finance. Import bank/brokerage CSVs, track net worth and allocation, analyze performance, set goals, and run projections.
 
 ## Quick Start
 
@@ -20,88 +20,74 @@ manage_accounts action=create name="Schwab Brokerage" institution="Schwab" type=
 manage_accounts action=create name="Fidelity 401k" institution="Fidelity" type="401k"
 ```
 
-### 2. Import transactions
+### 2. Import data
 Drop CSVs in `data/imports/`, then:
 ```
 import_csv file_path="/path/to/chase_checking.csv" account_id=1
-import_csv file_path="/path/to/chase_credit.csv" account_id=2
+import_holdings account_id=3 as_of="2025-01-15" file_path="/path/to/schwab_positions.csv"
 ```
 
 Auto-detects: Chase, BoA, Schwab, Fidelity, Vanguard, Amex, Discover, Apple Card, Capital One, Citi, Wells Fargo, USAA.
 
 For unknown formats, read headers and provide column_mapping.
 
-### 3. Categorize
+### 3. Categorize & link transfers
 ```
 categorize action=list_uncategorized group_by_description=true
 categorize action=create_rule pattern="WHOLE FOODS" category_path="Food > Groceries"
 categorize action=auto_categorize
-```
-
-Ships with ~60 default rules. Each import auto-applies rules. Review uncategorized periodically — each rule persists for future imports.
-
-### 3b. Detect & link transfers
-```
-categorize action=detect_transfers dry_run=true
 categorize action=detect_transfers
-categorize action=link_transfer transaction_id_a=145 transaction_id_b=203
-categorize action=unlink_transfer transaction_id=145
-categorize action=list_transfers
 ```
 
-Auto-detects matching transactions across accounts (same amount, opposite signs, within N days). Linked transfers are excluded from income/expense analysis.
+Ships with ~60 default rules. Each import auto-applies rules. Transfer detection links matching cross-account transactions and excludes them from income/expense analysis.
 
-### 3c. Edit transactions
+### 4. Wealth dashboard
 ```
-edit_transaction action=update transaction_id=42 description="Amazon - Desk Chair" tags=["office","reimbursable"]
-edit_transaction action=split transaction_id=99 splits=[{description:"Groceries",amount:-100,category_path:"Food > Groceries"},{description:"Household",amount:-50,category_path:"Shopping > Household"}]
-edit_transaction action=unsplit transaction_id=99
-edit_transaction action=exclude transaction_id=15
-edit_transaction action=restore transaction_id=15
-edit_transaction action=bulk_update match_description="AMZN" description="Amazon"
-edit_transaction action=history transaction_id=42
+wealth_summary period=ytd
+wealth_summary period=1y include_drift=true include_rebalance=true
 ```
 
-Edits preserve fingerprint for dedup stability. Splits create children and exclude parent.
+Primary tool — shows net worth, allocation, performance, contribution vs growth, drift, and milestone progress in one call.
 
-### 3d. Renormalize merchants
+### 5. Set allocation targets & milestones
 ```
-categorize action=renormalize
-```
-
-Re-extracts merchant names from all transaction descriptions. Run after updating merchant rules.
-
-### 4. Import holdings
-```
-import_holdings account_id=3 as_of="2025-01-15" file_path="/path/to/schwab_positions.csv"
+allocation action=set_target targets=[{asset_class:"us_stock",target_pct:60},{asset_class:"bond",target_pct:30},{asset_class:"intl_stock",target_pct:10}]
+allocation action=drift
+milestones action=create name="$1M Net Worth" target_amount=1000000 target_type=net_worth
+milestones action=check
 ```
 
-Or manual entry for smaller portfolios.
+### 6. Track growth over time
+```
+net_worth_history months=24 decompose=true trend=true
+get_holdings group_by="asset_class"
+```
 
-### 5. Query & analyze
+### 7. Project & scenario
+```
+forecast type="net_worth" months=12 investment_return=7 monthly_contribution=1000
+forecast type="cash_flow" adjustments=[{description: "Side gig", monthly_amount: 2000}]
+scenario name="Max out 401k" adjustments=[{type:"increase_contribution", description:"Max 401k", amount:1875}] investment_return=7
+scenario name="Bear market" adjustments=[{type:"change_return_assumption", description:"Bear market returns", amount:-5}] investment_return=7
+```
+
+### 8. Transaction analysis (secondary)
 ```
 query_transactions date_from="2025-01-01" group_by="category"
 query_transactions group_by="merchant" exclude_transfers=true
-query_transactions description="AMAZON" date_from="2025-01-01"
-query_transactions merchant="Amazon" date_from="2025-01-01"
-query_transactions tags="reimbursable"
 financial_summary type="income_statement" compare="previous_period"
-financial_summary type="balance_sheet"
 spending_analysis category="Food"
-net_worth_history months=24 include_accounts=true
 detect_recurring
-get_holdings group_by="asset_class"
-get_balances
 ```
 
-### 6. Project & scenario
-```
-forecast type="net_worth" months=12
-forecast type="cash_flow" adjustments=[{description: "Side gig", monthly_amount: 2000}]
-scenario name="Cut subscriptions" adjustments=[{type: "stop_recurring", description: "Netflix", amount: 15.99}, {type: "stop_recurring", description: "Spotify", amount: 12.99}] savings_target=10000
-```
+## Tools Reference (18 total)
 
-## Tools Reference (15 total)
+### Wealth & Allocation
+| Tool | Purpose |
+|------|---------|
+| `wealth_summary` | Primary dashboard: net worth, performance, allocation, drift, contributions vs growth, milestones |
+| `allocation` | View current allocation, set targets, check drift, get rebalance suggestions |
+| `milestones` | Create/track wealth goals (net worth, account, investment targets) |
 
 ### Data Management
 | Tool | Purpose |
@@ -125,39 +111,41 @@ scenario name="Cut subscriptions" adjustments=[{type: "stop_recurring", descript
 |------|---------|
 | `financial_summary` | Balance sheet, income statement, cash flow |
 | `spending_analysis` | Category breakdown with drill-down (uses merchant for grouping) |
-| `net_worth_history` | Net worth time series |
+| `net_worth_history` | Net worth time series with decomposition and trend analysis |
 | `detect_recurring` | Find subscriptions and regular payments (uses merchant for grouping) |
 
 ### Projections
 | Tool | Purpose |
 |------|---------|
-| `forecast` | Project cash flow or net worth forward |
-| `scenario` | What-if modeling with baseline comparison |
+| `forecast` | Project cash flow or net worth forward with investment return modeling |
+| `scenario` | What-if modeling: adjust spending, contributions, return assumptions |
 
 ### Direct SQL Access
 ```
 query_sql sql="SELECT name FROM sqlite_master WHERE type='table'"
 query_sql sql="SELECT * FROM transactions WHERE amount < ? AND date > ?" params=[-500, "2025-01-01"] limit=10
 query_sql sql="UPDATE transactions SET notes='reviewed' WHERE id=42"
-query_sql sql="DELETE FROM transactions WHERE import_batch = 'bad-batch-id'"
-query_sql sql="PRAGMA table_info('transactions')"
-query_sql sql="CREATE TABLE foo (id INTEGER PRIMARY KEY); INSERT INTO foo VALUES (1);" multi=true
 ```
 
 Use for manual inserts, bulk fixes, schema inspection, or any query the pre-built tools don't cover.
 
 ## Key Design Decisions
 
+- **Wealth-first**: `wealth_summary` is the primary tool. Transaction analysis is secondary.
 - **Amounts always signed**: negative = money out, positive = money in
 - **Fingerprint dedup**: re-importing same CSV is safe, duplicates are skipped. Edits preserve fingerprints.
 - **Categories are hierarchical**: `Food > Groceries`, queryable with prefix match
-- **Holdings are snapshots**: import current positions periodically, not a trade ledger
+- **Holdings are snapshots**: import current positions periodically, not a trade ledger. Performance is snapshot-to-snapshot.
+- **Simple returns, not time-weighted**: honest about limitations — we don't have daily valuations. Point-to-point with annualization.
 - **Balance snapshots**: ground truth independent of transaction math (critical for investment accounts)
-- **group_by on query tools**: this is what makes it an engine — Claude composes queries for any question
-- **Merchant normalization**: Raw descriptions cleaned to canonical names on import. `group_by=merchant` for clean grouping.
-- **Transfer detection**: Linked transfers excluded from income/expense analysis to prevent double-counting
-- **Transaction editing**: Splits use parent/child model. Excluded transactions filtered from all queries by default.
-- **Edit history**: All changes logged in `transaction_edits` table for audit trail
+- **Contribution detection via transfer linking**: `Transfer > Investment Contribution` category from transfer detection. No separate contribution table.
+- **Target allocation at asset-class level**: not per-security. Matches how most people think about allocation.
+- **Milestones evaluated on demand**: fits the MCP interaction pattern.
+- **Forecast uses simple monthly compounding**: `balance × (1 + annual_return/12/100)`
+- **No external price APIs**: system is self-contained, uses imported values only.
+- **group_by on query tools**: composable queries for any question
+- **Merchant normalization**: raw descriptions cleaned to canonical names on import
+- **Transfer detection**: linked transfers excluded from income/expense to prevent double-counting
 
 ## Data Location
 
